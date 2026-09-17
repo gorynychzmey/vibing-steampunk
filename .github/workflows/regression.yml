@@ -1,0 +1,129 @@
+name: Regression
+
+# Stage 1 of two. Measures the merged result of a pull request against its base
+# and uploads the rendered comment as an artifact. It never writes anything back
+# to the repository — `regression-comment.yml` does that, from trusted code.
+#
+# Why the split: 13 of the 14 pull requests open on this repo come from forks,
+# and a `pull_request` event from a fork gets a read-only GITHUB_TOKEN no matter
+# what the `permissions:` block says. A job here simply cannot post a comment.
+# The abaplint repos sidestep this by running regression on `push` and giving up
+# on forks entirely — which for this repo would mean giving up on almost every
+# pull request. So: untrusted code runs here with no write access at all, and a
+# second workflow picks up the artifact.
+#
+# Anything added to this file runs arbitrary code from a contributor's branch.
+# Keep `permissions` at contents: read, and never reference a secret.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number to measure"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regression-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    # Everything below runs twice — the merge result, then the base. The ceiling
+    # is here so a hung test cannot burn six hours.
+    timeout-minutes: 45
+    steps:
+      - name: Resolve what to measure
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            pr="${{ inputs.pr }}"
+            base=$(gh pr view "$pr" --json baseRefOid --jq .baseRefOid)
+            # refs/pull/N/merge is the same merge commit the pull_request event
+            # checks out. It does not exist while the PR is conflicting, so a
+            # dispatch against a conflicting PR fails at checkout — which is the
+            # honest answer, not a bug.
+            ref="refs/pull/$pr/merge"
+          else
+            pr="${{ github.event.pull_request.number }}"
+            base="${{ github.event.pull_request.base.sha }}"
+            ref=""
+          fi
+          echo "pr=$pr"     >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref"   >> "$GITHUB_OUTPUT"
+          echo "PR #$pr, base $base, ref ${ref:-<event default>}"
+
+      - name: Checkout (pull request event)
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          # The base commit has to be reachable for the second measurement.
+          fetch-depth: 0
+
+      - name: Checkout (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install benchstat
+        # x/perf publishes no stable tag, so this floats. A broken benchstat
+        # drops the benchmark section from the report rather than failing the
+        # job — report.sh checks for the binary before calling it.
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+        continue-on-error: true
+
+      - name: Measure the merged result
+        run: |
+          # The script has to survive the checkout of the base commit below,
+          # which would otherwise replace or delete it mid-run.
+          cp .github/regression/report.sh "$RUNNER_TEMP/report.sh"
+          bash "$RUNNER_TEMP/report.sh" measure "$RUNNER_TEMP/after"
+
+      - name: Reset to the base commit
+        run: |
+          git checkout -f "${{ steps.target.outputs.base }}"
+          git reset --hard
+          # Build output from packages that do not exist on the base would
+          # otherwise be picked up by the next build.
+          git clean -fdx
+          git status --short
+
+      - name: Measure the base
+        run: bash "$RUNNER_TEMP/report.sh" measure "$RUNNER_TEMP/before"
+
+      - name: Render the comment body
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          bash "$RUNNER_TEMP/report.sh" render \
+            "$RUNNER_TEMP/before" "$RUNNER_TEMP/after" > "$RUNNER_TEMP/out/body.md"
+          # Stage 2 cannot read the pull request number from a workflow_run
+          # payload when the head is a fork, so it travels in the artifact.
+          echo "${{ steps.target.outputs.pr }}" > "$RUNNER_TEMP/out/pr.txt"
+          cat "$RUNNER_TEMP/out/body.md"
+
+      - name: Upload the report
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-report
+          path: ${{ runner.temp }}/out
+          retention-days: 7
+
+      - name: Job summary
+        if: always()
+        run: cat "$RUNNER_TEMP/out/body.md" >> "$GITHUB_STEP_SUMMARY" || true

@@ -1,0 +1,31 @@
+version: 2
+
+updates:
+  # Go modules. Grouped and monthly on purpose: this repo pins a large
+  # dependency set, and ungrouped weekly updates produce more pull requests
+  # than anyone reviews — which ends with all of them ignored.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      go-minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Action versions. This is the one that actually matters for CI: an action
+  # pinned to a major tag can still break, and the workflows here name exact
+  # majors (`@v4`, `@v5`) rather than floating on `latest`.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(ci)"

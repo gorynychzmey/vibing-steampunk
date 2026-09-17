@@ -1,0 +1,119 @@
+name: Merge green
+
+# The button. Lists pull requests that are green and mergeable, and merges them
+# only when explicitly told to — `apply` defaults to false, so the plain run is
+# a dry run that reports what it would do.
+#
+# This is deliberately manual rather than a bot that merges on its own. It runs
+# from the default branch and never checks out a contributor's code; the only
+# thing it executes from a pull request is nothing at all.
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number, or blank for every open one"
+        required: false
+        type: string
+      apply:
+        description: "Actually merge (unchecked = dry run)"
+        required: false
+        default: false
+        type: boolean
+      method:
+        description: "Merge method"
+        required: false
+        default: squash
+        type: choice
+        options: [squash, rebase, merge]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: merge-green
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      APPLY: ${{ inputs.apply }}
+      METHOD: ${{ inputs.method }}
+    steps:
+      - name: Select candidates
+        id: select
+        run: |
+          if [ -n "${{ inputs.pr }}" ]; then
+            echo "${{ inputs.pr }}" | tr -dc '0-9\n' > /tmp/candidates
+          else
+            gh pr list --state open --limit 200 --json number --jq '.[].number' > /tmp/candidates
+          fi
+          wc -l < /tmp/candidates
+
+      - name: Check and merge
+        run: |
+          {
+            echo "| PR | mergeable | checks | review | verdict |"
+            echo "|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          merged=0
+          while read -r n; do
+            [ -n "$n" ] || continue
+
+            json=$(gh pr view "$n" --json mergeable,reviewDecision,isDraft,title,statusCheckRollup)
+            mergeable=$(echo "$json" | jq -r .mergeable)
+            review=$(echo "$json" | jq -r '.reviewDecision // "NONE"')
+            draft=$(echo "$json" | jq -r .isDraft)
+
+            # A rollup entry is either a check run (`conclusion`) or a legacy
+            # commit status (`state`). Treat SKIPPED and NEUTRAL as fine, and
+            # anything still running as not-yet-green rather than failed.
+            bad=$(echo "$json" | jq -r '
+              [.statusCheckRollup[]?
+               | (.conclusion // .state // "PENDING")
+               | ascii_upcase
+               | select(. != "SUCCESS" and . != "SKIPPED" and . != "NEUTRAL")]
+              | length')
+            total=$(echo "$json" | jq -r '[.statusCheckRollup[]?] | length')
+
+            verdict=""
+            if [ "$draft" = true ];              then verdict="draft";
+            elif [ "$mergeable" != MERGEABLE ];  then verdict="not mergeable ($mergeable)";
+            elif [ "$total" = 0 ];               then verdict="no checks reported";
+            elif [ "$bad" != 0 ];                then verdict="$bad check(s) not green";
+            elif [ "$review" = CHANGES_REQUESTED ]; then verdict="changes requested";
+            fi
+
+            if [ -n "$verdict" ]; then
+              printf '| #%s | %s | %s/%s green | %s | %s |\n' \
+                "$n" "$mergeable" "$((total-bad))" "$total" "$review" "$verdict" \
+                >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            if [ "$APPLY" = true ]; then
+              if gh pr merge "$n" --"$METHOD" --delete-branch; then
+                verdict="merged ($METHOD)"
+                merged=$((merged+1))
+              else
+                verdict="merge refused by GitHub"
+              fi
+            else
+              verdict="**would merge** (dry run)"
+            fi
+            printf '| #%s | %s | %s/%s green | %s | %s |\n' \
+              "$n" "$mergeable" "$total" "$total" "$review" "$verdict" \
+              >> "$GITHUB_STEP_SUMMARY"
+          done < /tmp/candidates
+
+          echo >> "$GITHUB_STEP_SUMMARY"
+          if [ "$APPLY" = true ]; then
+            echo "Merged $merged pull request(s)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Dry run — nothing was merged. Re-run with **apply** checked." >> "$GITHUB_STEP_SUMMARY"
+          fi

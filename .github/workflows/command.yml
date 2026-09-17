@@ -1,0 +1,67 @@
+name: Command
+
+# Slash commands typed into a pull request comment.
+#
+#   /regression   — re-measure this pull request
+#
+# `issue_comment` fires for every comment on every issue and pull request in the
+# repository, runs from the default branch, and carries a write token. That
+# combination is only safe because of the two guards below: the comment must be
+# on a pull request, and its author must have write access. Without the second
+# guard any passer-by could spend the repository's Actions budget, or worse.
+#
+# This workflow never checks out or executes a contributor's code. It asks
+# `Regression` to run, and `Regression` does that with a read-only token.
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  # Dispatching another workflow.
+  actions: write
+  # Reacting to the comment, so the author sees it was picked up.
+  issues: write
+  pull-requests: read
+
+jobs:
+  dispatch:
+    # A comment on a plain issue has no `pull_request` key. Checking the body
+    # here as well keeps the job from starting on every comment in the repo.
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/regression')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.issue.number }}
+      COMMENT_ID: ${{ github.event.comment.id }}
+    steps:
+      - name: Check the author has write access
+        run: |
+          assoc="${{ github.event.comment.author_association }}"
+          case "$assoc" in
+            OWNER|MEMBER|COLLABORATOR) echo "author is $assoc — allowed" ;;
+            *)
+              echo "::notice::Ignoring /regression from $assoc"
+              gh api -X POST "repos/$GH_REPO/issues/comments/$COMMENT_ID/reactions" \
+                -f content=confused >/dev/null
+              exit 1
+              ;;
+          esac
+
+      - name: Acknowledge
+        run: |
+          gh api -X POST "repos/$GH_REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=eyes >/dev/null
+
+      - name: Run Regression against this pull request
+        run: |
+          gh workflow run regression.yml -f pr="$PR"
+          echo "dispatched regression.yml for PR #$PR" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark as accepted
+        run: |
+          gh api -X POST "repos/$GH_REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=rocket >/dev/null

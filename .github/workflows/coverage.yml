@@ -1,0 +1,64 @@
+name: Coverage
+
+# Publishes the HTML coverage report for `main` to GitHub Pages, so a link can
+# answer "is this package tested" without anyone running the suite locally.
+#
+# Requires one manual setting, once: Settings → Pages → Source = GitHub Actions.
+# Until that is set, the deploy step fails and the rest of the job still works.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  # deploy-pages authenticates with OIDC, not with a stored secret.
+  id-token: write
+
+# Never cancel a deploy in flight; queue behind it instead. This is the one
+# place where cancel-in-progress is the wrong default.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  coverage:
+    if: github.repository == 'oisee/vibing-steampunk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Same scope as the regression report, so the number on the site and the
+      # number in a PR comment mean the same thing.
+      - name: Test with coverage
+        run: go test -coverprofile=cover.out -covermode=atomic ./pkg/...
+
+      - name: Render
+        run: |
+          mkdir -p site
+          go tool cover -html=cover.out -o site/index.html
+          go tool cover -func=cover.out | tee site/func.txt | tail -1
+
+      - name: Total to job summary
+        run: |
+          total=$(awk '/^total:/ {print $3}' site/func.txt)
+          echo "Coverage of \`./pkg/...\`: **$total**" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

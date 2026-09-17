@@ -1,0 +1,68 @@
+name: Conflicts
+
+# Labels open pull requests that no longer merge cleanly.
+#
+# This is a convenience, not a gate: the `pull_request` event already checks out
+# the merge result (`refs/pull/N/merge`), so a conflicting PR fails CI at
+# checkout on its own. What it adds is a visible marker on the PR list without
+# opening each one.
+on:
+  schedule:
+    # Scheduled runs are best-effort in GitHub and can slip by tens of minutes
+    # under load. For a label that does not matter.
+    - cron: '17 */6 * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: conflicts
+  cancel-in-progress: true
+
+jobs:
+  label:
+    if: github.repository == 'oisee/vibing-steampunk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      LABEL: has conflicts
+    steps:
+      # `gh` is preinstalled on the runner; nothing is checked out, because
+      # nothing here reads the tree.
+      - name: Ensure the label exists
+        run: |
+          gh label create "$LABEL" \
+            --color B60205 \
+            --description "Does not merge cleanly into main" \
+            2>/dev/null || true
+
+      - name: Label conflicting pull requests
+        run: |
+          # `mergeable` is computed asynchronously by GitHub: a PR touched
+          # moments ago answers UNKNOWN. Ask once, wait, ask again, and treat a
+          # still-UNKNOWN answer as "leave it alone" rather than guessing.
+          gh pr list --state open --limit 200 --json number > /tmp/prs.json
+          sleep 20
+
+          jq -r '.[].number' /tmp/prs.json | while read -r n; do
+            state=$(gh pr view "$n" --json mergeable --jq .mergeable)
+            case "$state" in
+              CONFLICTING)
+                echo "#$n conflicting"
+                gh pr edit "$n" --add-label "$LABEL"
+                ;;
+              MERGEABLE)
+                echo "#$n mergeable"
+                gh pr edit "$n" --remove-label "$LABEL" 2>/dev/null || true
+                ;;
+              *)
+                echo "#$n $state — skipped"
+                ;;
+            esac
+          done
