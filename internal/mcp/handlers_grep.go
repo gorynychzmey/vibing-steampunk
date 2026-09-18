@@ -59,7 +59,17 @@ func (s *Server) routeGrepAction(ctx context.Context, action, objectType, object
 	}
 	if name != "" {
 		if objType == "" {
-			objType = "CLAS"
+			// A bare one-word target is ambiguous: target="$TMP" is a package
+			// and target="ZREPORT" is a program, and guessing CLAS for either
+			// builds /sap/bc/adt/oo/classes/$tmp, which answers "Failed to
+			// read source" -- a wrong URL reported as a missing object. Say
+			// what is missing instead. $TMP is the very example the help text
+			// gives for package_name, so this is a likely call.
+			return newToolResultError(fmt.Sprintf(
+				"grep: %q alone does not say what kind of object it is. "+
+					"Pass target=\"CLAS %s\" (or PROG, INTF, FUGR), or params={\"object_type\": \"CLAS\"}, "+
+					"or grep a package with params={\"package_name\": %q}.",
+				name, name, name)), true, nil
 		}
 		url := buildADTObjectURL(objType, name)
 		if url == "" {

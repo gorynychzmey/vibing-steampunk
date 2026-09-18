@@ -66,9 +66,29 @@ func (s *Server) handleUniversalTool(ctx context.Context, request mcp.CallToolRe
 	// A query may carry its SQL in target instead of params. Keep the raw text:
 	// parseTarget upper-cases, which would corrupt string literals in the
 	// statement.
-	if action == "query" && getStringParam(params, "sql_query") == "" && looksLikeSQL(target) {
-		params["sql_query"] = strings.TrimSpace(target)
-		target = "SQL"
+	//
+	// The aliases are resolved *first*, so a statement passed explicitly in
+	// params wins over one that happens to be in target. Checking only
+	// sql_query here would let target silently shadow params={"query": ...},
+	// which is the kind of quietly-wrong answer this whole change exists to
+	// remove. And the map is copied rather than written into: params is the
+	// caller's own arguments map, not ours.
+	if action == "query" {
+		params = paramsWithAlias(params, "sql_query", "query", "sql", "statement")
+		if looksLikeSQL(target) {
+			if getStringParam(params, "sql_query") == "" {
+				out := make(map[string]any, len(params)+1)
+				for k, v := range params {
+					out[k] = v
+				}
+				out["sql_query"] = strings.TrimSpace(target)
+				params = out
+			}
+			// Either way the target has served its purpose and must not reach
+			// parseTarget, which would split "SELECT * FROM T000" into a type
+			// and a name and match nothing.
+			target = "SQL"
+		}
 	}
 
 	// Parse target into type and name
