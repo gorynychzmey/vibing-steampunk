@@ -37,6 +37,47 @@ func (s *Server) routeGrepAction(ctx context.Context, action, objectType, object
 		return s.callHandler(ctx, s.handleGrepObject, params)
 	}
 
+	// Object given by name rather than by URL:
+	//   SAP(action="grep", params={"object_name": "ZCL_TEST", "pattern": "..."})
+	//   SAP(action="grep", target="CLAS ZCL_TEST", params={"pattern": "..."})
+	// The handler only knows URLs, so build one from type and name.
+	name := getStringParam(params, "object_name")
+	objType := strings.ToUpper(getStringParam(params, "object_type"))
+	if name == "" {
+		// target="CLAS ZCL_TEST", or target="ZCL_TEST"
+		if objectName != "" {
+			name = objectName
+			if objType == "" {
+				objType = objectType
+			}
+		} else {
+			name = objectType
+		}
+	} else if objType == "" && objectName == "" && objectType != "" {
+		// target carried the type only: target="CLAS", params={"object_name": ...}
+		objType = objectType
+	}
+	if name != "" {
+		if objType == "" {
+			objType = "CLAS"
+		}
+		url := buildADTObjectURL(objType, name)
+		if url == "" {
+			return newToolResultError(fmt.Sprintf(
+				"Cannot build an object URL for object_type=%q. Supported types: CLAS, PROG, INTF, FUGR. "+
+					"Pass object_url instead, or grep a package with params={\"package_name\": \"...\"}.",
+				objType)), true, nil
+		}
+		args := map[string]any{"object_url": url}
+		for k, v := range params {
+			if k == "object_name" || k == "object_type" {
+				continue
+			}
+			args[k] = v
+		}
+		return s.callHandler(ctx, s.handleGrepObject, args)
+	}
+
 	return nil, false, nil
 }
 

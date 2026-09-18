@@ -383,6 +383,41 @@ func getUnhandledErrorMessage(action, objectType, objectName string) string {
 	case "create":
 		sb.WriteString("Supported create targets: OBJECT, DEVC, TABL, CLONE, PROGRAM, CLASS_WITH_TESTS, CLAS_TEST_INCLUDE\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"create\") for examples.")
+	case "query":
+		sb.WriteString("Query needs a statement or a table:\n")
+		sb.WriteString("  SAP(action=\"query\", params={\"sql_query\": \"SELECT * FROM T000\", \"max_rows\": 10})\n")
+		sb.WriteString("  SAP(action=\"query\", target=\"TABL_CONTENTS T000\", params={\"max_rows\": 50})\n")
+		sb.WriteString("Use SAP(action=\"help\", target=\"query\") for examples.")
+	case "search":
+		sb.WriteString("Search needs a query: SAP(action=\"search\", target=\"ZCL_*\")\n")
+		sb.WriteString("Use SAP(action=\"help\", target=\"search\") for examples.")
+	case "grep":
+		sb.WriteString("Grep needs a pattern and something to search:\n")
+		sb.WriteString("  params={\"package_name\": \"$TMP\", \"pattern\": \"SELECT\"}\n")
+		sb.WriteString("  params={\"object_name\": \"ZCL_TEST\", \"pattern\": \"MODIFY\"}\n")
+		sb.WriteString("  params={\"object_url\": \"/sap/bc/adt/oo/classes/zcl_test\", \"pattern\": \"MODIFY\"}\n")
+		sb.WriteString("Use SAP(action=\"help\", target=\"grep\") for examples.")
+	case "test":
+		sb.WriteString("Test needs an object:\n")
+		sb.WriteString("  Unit tests: params={\"object_url\": \"/sap/bc/adt/oo/classes/zcl_test\"}\n")
+		sb.WriteString("  ATC:        target=\"ATC\", params={\"object_url\": \"/sap/bc/adt/oo/classes/zcl_test\"}\n")
+		sb.WriteString("Use SAP(action=\"help\", target=\"test\") for examples.")
+	case "analyze":
+		sb.WriteString("Analyze needs params={\"type\": ...}, e.g. syntax_check, call_graph, callers, callees,\n")
+		sb.WriteString("object_structure, check_boundaries, impact, health, cds_impact, parse_abap, execute_abap,\n")
+		sb.WriteString("list_dumps, list_traces, abap_help.\n")
+		sb.WriteString("Use SAP(action=\"help\", target=\"analyze\") for examples.")
+	case "system":
+		sb.WriteString("Supported system targets: INFO, COMPONENTS, CONNECTION, FEATURES\n")
+		sb.WriteString("Or params={\"type\": ...}: system_info, components, connection, features,\n")
+		sb.WriteString("list_transports, get_transport, create_transport, release_transport, delete_transport,\n")
+		sb.WriteString("get_user_transports, get_transport_info, git_types, git_export, install_zadt_vsp,\n")
+		sb.WriteString("install_abapgit, install_dummy_test, list_dependencies, deploy_zip,\n")
+		sb.WriteString("save_to_file, deploy_from_file, rename\n")
+		sb.WriteString("Use SAP(action=\"help\", target=\"system\") for examples.")
+	case "delete":
+		sb.WriteString("Supported delete targets: OBJECT, UI5_FILE, UI5_APP\n")
+		sb.WriteString("Use SAP(action=\"help\", target=\"delete\") for examples.")
 	case "debug":
 		sb.WriteString("Supported debug targets: SET_BREAKPOINT, GET_BREAKPOINTS, DELETE_BREAKPOINT, LISTEN, ATTACH, DETACH, STEP, GET_STACK, GET_VARIABLES, CALL_RFC, MOVE, RUN_REPORT, GET_VARIANTS, GET_TEXT_ELEMENTS, SET_TEXT_ELEMENTS, AMDP_*\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"debug\") for examples.")

@@ -46,6 +46,10 @@ func (s *Server) routeAnalysisAction(ctx context.Context, action, objectType, ob
 		return s.callHandler(ctx, s.handleUsageExamples, params)
 	case "health":
 		return s.callHandler(ctx, s.handleHealth, params)
+	case "cds_impact":
+		// Same handler as read target="CDS_IMPACT"; it expects view_name.
+		return s.callHandler(ctx, s.handleGetCDSImpactAnalysis,
+			paramsWithAlias(params, "view_name", "cds_view", "ddls_name", "object_name", "name"))
 	}
 	return nil, false, nil
 }

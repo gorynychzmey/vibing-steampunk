@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -157,5 +158,121 @@ func TestDebuggerGetVariablesSchemaIncludesItems(t *testing.T) {
 
 	if items["type"] != "string" {
 		t.Fatalf("expected variable_ids.items.type to be 'string', got %v", items["type"])
+	}
+}
+
+// resultText concatenates the text content of a tool result.
+func resultText(result *mcp.CallToolResult) string {
+	if result == nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, c := range result.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			sb.WriteString(tc.Text)
+		}
+	}
+	return sb.String()
+}
+
+// TestUniversalToolDispatchesAdvertisedForms drives the hyperfocused SAP tool
+// against a dead URL: a call that is wired fails at the network, a call that is
+// not wired answers "No handler found" without ever getting there.
+func TestUniversalToolDispatchesAdvertisedForms(t *testing.T) {
+	cfg := &Config{
+		BaseURL:  "http://127.0.0.1:1",
+		Username: "probe",
+		Password: "probe",
+		Client:   "001",
+		Language: "EN",
+	}
+	s := NewServer(cfg)
+
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"system info by params", map[string]any{"action": "system", "params": map[string]any{"type": "system_info"}}},
+		{"system components by params", map[string]any{"action": "system", "params": map[string]any{"type": "components"}}},
+		{"system connection by params", map[string]any{"action": "system", "params": map[string]any{"type": "connection"}}},
+		{"system info by target", map[string]any{"action": "system", "target": "INFO"}},
+		{"query sql_query", map[string]any{"action": "query", "params": map[string]any{"sql_query": "SELECT * FROM T000"}}},
+		{"query alias query", map[string]any{"action": "query", "params": map[string]any{"query": "SELECT * FROM T000"}}},
+		{"query sql in target", map[string]any{"action": "query", "target": "SELECT * FROM T000"}},
+		{"query table in target", map[string]any{"action": "query", "target": "T000"}},
+		{"query table contents", map[string]any{"action": "query", "target": "TABL_CONTENTS T000"}},
+		{"test atc by target", map[string]any{"action": "test", "target": "ATC", "params": map[string]any{"object_uri": "/sap/bc/adt/oo/classes/zcl_test"}}},
+		{"test atc by type", map[string]any{"action": "test", "params": map[string]any{"type": "atc", "object_url": "/sap/bc/adt/oo/classes/zcl_test"}}},
+		{"test unit tests", map[string]any{"action": "test", "params": map[string]any{"object_url": "/sap/bc/adt/oo/classes/zcl_test"}}},
+		{"analyze cds_impact", map[string]any{"action": "analyze", "params": map[string]any{"type": "cds_impact", "cds_view": "ZDDL_VIEW"}}},
+		{"grep by object_name", map[string]any{"action": "grep", "params": map[string]any{"object_name": "ZCL_TEST", "pattern": "MODIFY"}}},
+		{"grep by target", map[string]any{"action": "grep", "target": "CLAS ZCL_TEST", "params": map[string]any{"pattern": "MODIFY"}}},
+		{"grep by object_url", map[string]any{"action": "grep", "params": map[string]any{"object_url": "/sap/bc/adt/oo/classes/zcl_test", "pattern": "MODIFY"}}},
+		{"search", map[string]any{"action": "search", "target": "ZCL_*"}},
+		{"read class", map[string]any{"action": "read", "target": "CLAS ZCL_TEST"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := s.handleUniversalTool(context.Background(), newRequest(tc.args))
+			if err != nil {
+				t.Fatalf("handleUniversalTool returned an error: %v", err)
+			}
+			text := resultText(result)
+			if strings.Contains(text, "No handler found") {
+				t.Errorf("action was not dispatched: %s", text)
+			}
+		})
+	}
+}
+
+// TestUniversalToolATCNotMistakenForUnitTest pins the routing order: target
+// "ATC" with an object_url is an ATC run, not a unit-test run.
+func TestUniversalToolATCNotMistakenForUnitTest(t *testing.T) {
+	s := NewServer(&Config{BaseURL: "http://127.0.0.1:1", Username: "probe", Password: "probe", Client: "001", Language: "EN"})
+
+	for _, key := range []string{"object_url", "object_uri"} {
+		result, err := s.handleUniversalTool(context.Background(), newRequest(map[string]any{
+			"action": "test",
+			"target": "ATC",
+			"params": map[string]any{key: "/sap/bc/adt/oo/classes/zcl_test"},
+		}))
+		if err != nil {
+			t.Fatalf("handleUniversalTool returned an error: %v", err)
+		}
+		text := resultText(result)
+		if strings.Contains(text, "No handler found") {
+			t.Errorf("%s: ATC was not dispatched: %s", key, text)
+		}
+		if !strings.Contains(text, "ATC") {
+			t.Errorf("%s: expected an ATC run, got: %s", key, text)
+		}
+	}
+}
+
+// TestUniversalToolQueryParamMapping checks that the SQL reaches the handler
+// unchanged whichever documented spelling it arrived under.
+func TestUniversalToolQueryParamMapping(t *testing.T) {
+	const stmt = "SELECT * FROM T000 WHERE mandt = 'abc'"
+
+	if !looksLikeSQL(stmt) {
+		t.Error("looksLikeSQL should accept a SELECT statement")
+	}
+	if looksLikeSQL("CLAS ZCL_TEST") || looksLikeSQL("T000") {
+		t.Error("looksLikeSQL should reject an object reference")
+	}
+
+	params := map[string]any{"object_uri": "/sap/bc/adt/oo/classes/zcl_test"}
+	mapped := paramsWithAlias(params, "object_url", "object_uri")
+	if mapped["object_url"] != "/sap/bc/adt/oo/classes/zcl_test" {
+		t.Errorf("object_url = %v, want the value of object_uri", mapped["object_url"])
+	}
+	if _, ok := params["object_url"]; ok {
+		t.Error("paramsWithAlias must not modify the input map")
+	}
+
+	kept := map[string]any{"object_url": "a", "object_uri": "b"}
+	if paramsWithAlias(kept, "object_url", "object_uri")["object_url"] != "a" {
+		t.Error("an existing value must win over its alias")
 	}
 }

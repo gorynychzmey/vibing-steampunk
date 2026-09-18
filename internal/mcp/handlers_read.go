@@ -84,23 +84,47 @@ func (s *Server) routeReadAction(ctx context.Context, action, objectType, object
 	}
 
 	if action == "query" {
+		// The SQL statement is passed as params.sql_query; accept the aliases a
+		// caller is likely to reach for, since the handlers expect sql_query.
+		sqlQuery := getStringParam(params, "sql_query")
+		if sqlQuery == "" {
+			for _, alias := range []string{"query", "sql", "statement"} {
+				if v := getStringParam(params, alias); v != "" {
+					sqlQuery = v
+					break
+				}
+			}
+		}
+
 		switch objectType {
 		case "TABL_CONTENTS":
 			args := map[string]any{"table_name": objectName}
 			if v, ok := getFloatParam(params, "max_rows"); ok {
 				args["max_rows"] = v
 			}
-			if v := getStringParam(params, "sql_query"); v != "" {
-				args["sql_query"] = v
+			if sqlQuery != "" {
+				args["sql_query"] = sqlQuery
 			}
 			return s.callHandler(ctx, s.handleGetTableContents, args)
 		case "SQL", "":
-			if sqlQuery := getStringParam(params, "sql_query"); sqlQuery != "" {
+			if sqlQuery != "" {
 				args := map[string]any{"sql_query": sqlQuery}
 				if v, ok := getFloatParam(params, "max_rows"); ok {
 					args["max_rows"] = v
 				}
 				return s.callHandler(ctx, s.handleRunQuery, args)
+			}
+		default:
+			// A bare table name as target: SAP(action="query", target="T000").
+			if objectName == "" {
+				args := map[string]any{"table_name": objectType}
+				if v, ok := getFloatParam(params, "max_rows"); ok {
+					args["max_rows"] = v
+				}
+				if sqlQuery != "" {
+					args["sql_query"] = sqlQuery
+				}
+				return s.callHandler(ctx, s.handleGetTableContents, args)
 			}
 		}
 	}

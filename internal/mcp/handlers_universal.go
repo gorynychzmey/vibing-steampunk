@@ -63,6 +63,14 @@ func (s *Server) handleUniversalTool(ctx context.Context, request mcp.CallToolRe
 		return handleHelp(target), nil
 	}
 
+	// A query may carry its SQL in target instead of params. Keep the raw text:
+	// parseTarget upper-cases, which would corrupt string literals in the
+	// statement.
+	if action == "query" && getStringParam(params, "sql_query") == "" && looksLikeSQL(target) {
+		params["sql_query"] = strings.TrimSpace(target)
+		target = "SQL"
+	}
+
 	// Parse target into type and name
 	objectType, objectName := parseTarget(target)
 
@@ -124,6 +132,42 @@ func parseTarget(target string) (objectType, objectName string) {
 		objectName = strings.ToUpper(strings.TrimSpace(parts[1]))
 	}
 	return
+}
+
+// looksLikeSQL reports whether a target string is a SQL statement rather than
+// an object reference.
+func looksLikeSQL(target string) bool {
+	fields := strings.Fields(strings.ToUpper(strings.TrimSpace(target)))
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "SELECT", "WITH":
+		return true
+	}
+	return false
+}
+
+// paramsWithAlias returns params with dst filled from the first non-empty
+// alias, so a handler never drops an argument that arrived under one of the
+// other documented names. The input map is left untouched.
+func paramsWithAlias(params map[string]any, dst string, aliases ...string) map[string]any {
+	if getStringParam(params, dst) != "" {
+		return params
+	}
+	for _, alias := range aliases {
+		v := getStringParam(params, alias)
+		if v == "" {
+			continue
+		}
+		out := make(map[string]any, len(params)+1)
+		for k, val := range params {
+			out[k] = val
+		}
+		out[dst] = v
+		return out
+	}
+	return params
 }
 
 // getObject extracts a nested object (map[string]any) from args.
