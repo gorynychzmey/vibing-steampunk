@@ -471,6 +471,7 @@ Transports:
   SAP(action="system", params={"type": "delete_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "merge_transports", "source": ["A4HK900001", "A4HK900003"], "target": "A4HK900005"})
   SAP(action="system", params={"type": "move_transport_object", "object": "PROG ZDEMO", "from": "A4HK900001", "to": "A4HK900005"})
+  SAP(action="system", params={"type": "copy_to_toc", "transport": "A4HK900001", "target": "QAS"})  - transport of copies, as SE01 (ZADT_VSP); "release": true releases it
       SE09's Merge Requests and a single entry's move, through ZADT_VSP's function bridge (needs ZADT_VSP)
   SAP(action="system", params={"type": "get_user_transports", "user_name": "DEVELOPER"})
       same parameters as list_transports (request_type, request_status, released_from/to, targets, source, config_uri)

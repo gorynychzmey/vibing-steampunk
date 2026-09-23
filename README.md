@@ -430,6 +430,23 @@ MCP: `system` with `merge_transports` (`source`, `target`) and
 `move_transport_object` (`object`, `from`, `to`). Both need ZADT_VSP on the
 system — redeploy it after this release, the bridge changed.
 
+**A transport of copies** of a request, the way SE01 builds one: the request is
+created over ADT (`tm:type` T, with a target), and its object list copied in
+with `TR_COPY_COMM` through the same bridge — from each task that holds
+objects while the request is modifiable, since the function copies only the
+entries of the request it is given, and from the request itself once it is
+released. The description defaults to `ToC ` and the original's. ADT takes a
+target without a client (`QAS`, not SE01's `QAS.100`), or a target group.
+Nothing is released unless asked:
+
+```bash
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport toc TR-A --target QAS
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport toc TR-A --target /GROUP/ --release
+```
+
+MCP: `system` with `copy_to_toc` (`transport`, `target`, optional
+`description`, `cts_project`, `release`).
+
 `vsp update` fetches the latest release for this platform, compares it with
 the running version, verifies the download against the release's
 `checksums.txt`, and puts it in place of the running binary — the old one is

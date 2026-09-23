@@ -247,7 +247,7 @@ func (c *Client) CreateTransport(ctx context.Context, objectURL string, descript
 		return "", err
 	}
 
-	body := c.newRequestBody("K", description, "", "")
+	body := c.newRequestBody("K", description, "", "", true)
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/cts/transportrequests", &RequestOptions{
 		Method:      http.MethodPost,
@@ -761,7 +761,7 @@ func (c *Client) CreateTransportV2(ctx context.Context, opts CreateTransportOpti
 		reqType = "W"
 	}
 
-	body := c.newRequestBody(reqType, opts.Description, opts.Target, opts.CTSProject)
+	body := c.newRequestBody(reqType, opts.Description, opts.Target, opts.CTSProject, true)
 
 	query := make(map[string][]string)
 	if opts.TransportLayer != "" {
@@ -783,29 +783,33 @@ func (c *Client) CreateTransportV2(ctx context.Context, opts CreateTransportOpti
 }
 
 // newRequestBody is the body ADT's transportrequests endpoint takes to create a
-// request with one task for the logged-on user. An empty target or project
-// falls back to the configured one, and to SAP's own default after that.
+// request, with one task for the logged-on user when withTask is set (a
+// transport of copies has none). An empty target or project falls back to the
+// configured one, and to SAP's own default after that.
 //
 // ADT's answer names the project by its external ID, not by the name it stored
 // in E070A (SAP_CTS_PROJECT), which is the record.
-func (c *Client) newRequestBody(reqType, description, target, project string) string {
+func (c *Client) newRequestBody(reqType, description, target, project string, withTask bool) string {
 	if target == "" {
 		target = c.config.TransportTarget
 	}
 	if project == "" {
 		project = c.config.CTSProject
 	}
+	task := ""
+	if withTask {
+		task = fmt.Sprintf("\n    <tm:task tm:owner=\"%s\"/>", escapeXMLAttr(strings.ToUpper(c.config.Username)))
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <tm:root xmlns:tm="http://www.sap.com/cts/adt/tm" tm:useraction="newrequest">
-  <tm:request tm:type="%s" tm:desc="%s" tm:target="%s" tm:cts_project="%s">
-    <tm:task tm:owner="%s"/>
+  <tm:request tm:type="%s" tm:desc="%s" tm:target="%s" tm:cts_project="%s">%s
   </tm:request>
 </tm:root>`,
 		reqType,
 		escapeXMLAttr(description),
 		escapeXMLAttr(target),
 		escapeXMLAttr(project),
-		escapeXMLAttr(strings.ToUpper(c.config.Username)))
+		task)
 }
 
 // parseCreateTransportResponse extracts the transport number from the XML response.
