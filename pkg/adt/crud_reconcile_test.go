@@ -239,6 +239,9 @@ func TestCreateObject_PartialPersistenceLockFails(t *testing.T) {
 		routes: []routedResponse{
 			resp("", "discovery", 200, "ok"),
 			resp(http.MethodPost, "nodestructure", 200, packageNodeStructureXML),
+			// The delete gate resolves the package before the cleanup locks
+			// anything (issue #238), so it must pass for the lock to be reached.
+			resp("", "informationsystem/search", 200, searchZTESTInTmpXML),
 			// Specific path (with name) before broad. Lock POST →
 			// 403 to simulate "locked by another user".
 			resp(http.MethodGet, "/programs/programs/ZTEST", 200, "<p/>"),
