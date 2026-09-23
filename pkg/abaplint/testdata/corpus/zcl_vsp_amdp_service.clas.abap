@@ -709,12 +709,12 @@ CLASS zcl_vsp_amdp_service IMPLEMENTATION.
         ENDIF.
 
         " Step 3: Execute AMDP (this will pause at breakpoint)
-        DATA lt_result TYPE zcl_vsp_00_amdp_test=>tt_result.
+        DATA lt_result TYPE zcl_adt_00_amdp_test=>tt_result.
         DATA lv_execution_error TYPE string.
 
         IF to_upper( lv_class ) = 'ZCL_ADT_00_AMDP_TEST' AND to_upper( lv_method ) = 'CALCULATE_SQUARES'.
           TRY.
-              zcl_vsp_00_amdp_test=>calculate_squares(
+              zcl_adt_00_amdp_test=>calculate_squares(
                 EXPORTING iv_count  = lv_count
                 IMPORTING et_result = lt_result
               ).
