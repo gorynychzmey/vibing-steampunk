@@ -67,6 +67,10 @@ type systemParams struct {
 	TransportChoice         string
 	BlockFreeSQL            bool
 
+	// Where a request vsp creates is filed: CTS project and transport target.
+	CTSProject      string
+	TransportTarget string
+
 	Cache     bool
 	CachePath string
 }
@@ -139,6 +143,8 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 			AllowedTransports:       firstNonEmptyList(sys.AllowedTransports, splitList(os.Getenv("SAP_ALLOWED_TRANSPORTS"))),
 			AllowTransportableEdits: sys.AllowTransportableEdits || envFlag("SAP_ALLOW_TRANSPORTABLE_EDITS"),
 			TransportChoice:         firstNonEmpty(sys.TransportChoice, os.Getenv("SAP_TRANSPORT_CHOICE")),
+			CTSProject:              firstNonEmpty(sys.CTSProject, os.Getenv("SAP_CTS_PROJECT")),
+			TransportTarget:         firstNonEmpty(sys.TransportTarget, os.Getenv("SAP_TRANSPORT_TARGET")),
 			BlockFreeSQL:            sys.BlockFreeSQL || envFlag("SAP_BLOCK_FREE_SQL"),
 			Cache:                   sys.Cache,
 			CachePath:               sys.CachePath,
@@ -173,6 +179,8 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 		TransportAttribute: resolveTransportAttributeFromEnv(),
 		ReadOnly:           strings.EqualFold(os.Getenv("SAP_READ_ONLY"), "true"),
 		AllowedPackages:    splitList(os.Getenv("SAP_ALLOWED_PACKAGES")),
+		CTSProject:         os.Getenv("SAP_CTS_PROJECT"),
+		TransportTarget:    os.Getenv("SAP_TRANSPORT_TARGET"),
 		Cache:              cacheEnabled,
 		CachePath:          cachePath,
 	}, nil
@@ -288,6 +296,12 @@ func buildClient(params *systemParams) (*adt.Client, error) {
 	}
 	if restricted {
 		opts = append(opts, adt.WithSafety(safety))
+	}
+	if params.CTSProject != "" {
+		opts = append(opts, adt.WithCTSProject(params.CTSProject))
+	}
+	if params.TransportTarget != "" {
+		opts = append(opts, adt.WithTransportTarget(params.TransportTarget))
 	}
 	if params.Insecure {
 		opts = append(opts, adt.WithInsecureSkipVerify())

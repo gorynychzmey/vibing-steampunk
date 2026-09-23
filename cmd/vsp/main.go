@@ -144,6 +144,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.TransportReadOnly, "transport-read-only", false, "Only allow read operations on transports (list, get)")
 	rootCmd.Flags().StringSliceVar(&cfg.AllowedTransports, "allowed-transports", nil, "Restrict transport operations to specific transports (comma-separated, supports wildcards like A4HK*)")
 	rootCmd.Flags().BoolVar(&cfg.AllowTransportableEdits, "allow-transportable-edits", false, "Allow editing objects in transportable packages (requires transport parameter)")
+	rootCmd.Flags().StringVar(&cfg.CTSProject, "cts-project", "", "CTS project every request vsp creates is filed under, unless the call names one (for systems that require a project)")
+	rootCmd.Flags().StringVar(&cfg.TransportTarget, "transport-target", "", "Transport target of every request vsp creates, unless the call names one")
 	rootCmd.Flags().StringVar(&cfg.TransportChoice, "transport-choice", "auto", "A write with no transport named: auto picks the object's own or an open request of yours that fits (and creates one with --enable-transports); off leaves it to SAP, which generates a request per write")
 
 	// Mode options
@@ -457,6 +459,12 @@ func resolveConfig(cmd *cobra.Command) {
 		if v := viper.GetString("TRANSPORT_CHOICE"); v != "" {
 			cfg.TransportChoice = v
 		}
+	}
+	if !cmd.Flags().Changed("cts-project") {
+		cfg.CTSProject = viper.GetString("CTS_PROJECT")
+	}
+	if !cmd.Flags().Changed("transport-target") {
+		cfg.TransportTarget = viper.GetString("TRANSPORT_TARGET")
 	}
 
 	// Feature configuration: flag > SAP_FEATURE_* env
