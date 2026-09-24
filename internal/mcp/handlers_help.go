@@ -467,6 +467,7 @@ Transports:
   SAP(action="system", params={"type": "get_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "create_transport", "description": "...", "package": "$TMP"})
   SAP(action="system", params={"type": "release_transport", "transport": "A4HK900001"})
+  SAP(action="system", params={"type": "import_transport", "transport": "A4HK900001", "client": "100"})  - import into THIS system, as STMS_IMPORT (classic RFC; needs allow_transport_import)
   SAP(action="system", params={"type": "delete_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "merge_transports", "source": ["A4HK900001", "A4HK900003"], "target": "A4HK900005"})
   SAP(action="system", params={"type": "move_transport_object", "object": "PROG ZDEMO", "from": "A4HK900001", "to": "A4HK900005"})

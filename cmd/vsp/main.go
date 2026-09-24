@@ -144,6 +144,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.TransportReadOnly, "transport-read-only", false, "Only allow read operations on transports (list, get)")
 	rootCmd.Flags().StringSliceVar(&cfg.AllowedTransports, "allowed-transports", nil, "Restrict transport operations to specific transports (comma-separated, supports wildcards like A4HK*)")
 	rootCmd.Flags().BoolVar(&cfg.AllowTransportableEdits, "allow-transportable-edits", false, "Allow editing objects in transportable packages (requires transport parameter)")
+	rootCmd.Flags().BoolVar(&cfg.AllowTransportImport, "allow-transport-import", false, "Allow importing released requests into the connected system (as STMS_IMPORT there); independent of --read-only")
 	rootCmd.Flags().StringVar(&cfg.TransportChoice, "transport-choice", "auto", "A write with no transport named: auto picks the object's own or an open request of yours that fits (and creates one with --enable-transports); off leaves it to SAP, which generates a request per write")
 
 	// Mode options
@@ -290,6 +291,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 		if cfg.AllowTransportableEdits {
 			fmt.Fprintf(os.Stderr, "[VERBOSE] Safety: Transportable edits ENABLED (can modify non-local objects)\n")
+		}
+		if cfg.AllowTransportImport {
+			fmt.Fprintf(os.Stderr, "[VERBOSE] Safety: Transport import ENABLED (can import released requests into this system)\n")
 		}
 		if !cfg.ReadOnly && !cfg.BlockFreeSQL && cfg.AllowedOps == "" && cfg.DisallowedOps == "" && len(cfg.AllowedPackages) == 0 {
 			fmt.Fprintf(os.Stderr, "[VERBOSE] Safety: UNRESTRICTED (no safety checks active)\n")
@@ -452,6 +456,9 @@ func resolveConfig(cmd *cobra.Command) {
 	}
 	if !cmd.Flags().Changed("allow-transportable-edits") {
 		cfg.AllowTransportableEdits = viper.GetBool("ALLOW_TRANSPORTABLE_EDITS")
+	}
+	if !cmd.Flags().Changed("allow-transport-import") {
+		cfg.AllowTransportImport = viper.GetBool("ALLOW_TRANSPORT_IMPORT")
 	}
 	// The server's own system in .vsp.json, for its per-system settings.
 	cfg.SystemName = systemName

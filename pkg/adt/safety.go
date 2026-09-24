@@ -77,6 +77,13 @@ type SafetyConfig struct {
 	// fits — and creates one when none does and transports are enabled;
 	// "off" leaves the choice to SAP, which generates a request per write.
 	TransportChoice string
+
+	// AllowTransportImport lets vsp import released requests into the
+	// connected system (CTS_API_IMPORT_CHANGE_REQUEST, as STMS_IMPORT). Off by
+	// default, and independent of ReadOnly, which is about the repository:
+	// an import changes the system wholesale, so it is named on its own.
+	// Use --allow-transport-import or SAP_ALLOW_TRANSPORT_IMPORT=true.
+	AllowTransportImport bool
 }
 
 // DefaultSafetyConfig returns a safe default configuration (read-only, no free SQL)

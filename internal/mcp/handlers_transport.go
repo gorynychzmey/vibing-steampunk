@@ -35,6 +35,8 @@ func (s *Server) routeTransportAction(ctx context.Context, action, objectType, o
 		return s.callHandler(ctx, s.handleGetTransportInfo, params)
 	case "execute_abap":
 		return s.callHandler(ctx, s.handleExecuteABAP, params)
+	case "import_transport", "import_transports":
+		return s.callHandler(ctx, s.handleImportTransport, params)
 	case "merge_transports":
 		return s.callHandler(ctx, s.handleMergeTransports, params)
 	case "move_transport_object", "move_object":

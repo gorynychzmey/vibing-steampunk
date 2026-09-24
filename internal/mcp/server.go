@@ -99,6 +99,7 @@ type Config struct {
 	TransportReadOnly       bool     // Only allow read operations on transports (list, get)
 	AllowedTransports       []string // Whitelist specific transports (supports wildcards like "A4HK*")
 	AllowTransportableEdits bool     // Allow editing objects that require transport requests
+	AllowTransportImport    bool     // Allow importing released requests into the connected system
 	TransportChoice         string   // auto (default): pick a request for a write that names none; off: leave it to SAP
 
 	// Feature configuration (safety network)
@@ -197,6 +198,9 @@ func NewServer(cfg *Config) *Server {
 	}
 	if cfg.AllowTransportableEdits {
 		safety.AllowTransportableEdits = true
+	}
+	if cfg.AllowTransportImport {
+		safety.AllowTransportImport = true
 	}
 	if cfg.TransportChoice != "" {
 		safety.TransportChoice = cfg.TransportChoice

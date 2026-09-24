@@ -64,6 +64,7 @@ type systemParams struct {
 	TransportReadOnly       bool
 	AllowedTransports       []string
 	AllowTransportableEdits bool
+	AllowTransportImport    bool
 	TransportChoice         string
 	BlockFreeSQL            bool
 
@@ -138,6 +139,7 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 			TransportReadOnly:       sys.TransportReadOnly || envFlag("SAP_TRANSPORT_READ_ONLY"),
 			AllowedTransports:       firstNonEmptyList(sys.AllowedTransports, splitList(os.Getenv("SAP_ALLOWED_TRANSPORTS"))),
 			AllowTransportableEdits: sys.AllowTransportableEdits || envFlag("SAP_ALLOW_TRANSPORTABLE_EDITS"),
+			AllowTransportImport:    sys.AllowTransportImport || envFlag("SAP_ALLOW_TRANSPORT_IMPORT"),
 			TransportChoice:         firstNonEmpty(sys.TransportChoice, os.Getenv("SAP_TRANSPORT_CHOICE")),
 			BlockFreeSQL:            sys.BlockFreeSQL || envFlag("SAP_BLOCK_FREE_SQL"),
 			Cache:                   sys.Cache,
@@ -284,6 +286,10 @@ func buildClient(params *systemParams) (*adt.Client, error) {
 	}
 	if params.AllowTransportableEdits {
 		safety.AllowTransportableEdits = true
+		restricted = true
+	}
+	if params.AllowTransportImport {
+		safety.AllowTransportImport = true
 		restricted = true
 	}
 	if restricted {

@@ -419,6 +419,24 @@ MCP: `system` with `merge_transports` (`source`, `target`) and
 `move_transport_object` (`object`, `from`, `to`). Both need ZADT_VSP on the
 system — redeploy it after this release, the bridge changed.
 
+**Importing a released request** is what STMS_IMPORT does in the target
+system, and vsp does it the same way: `CTS_API_IMPORT_CHANGE_REQUEST` over
+classic RFC, called in the system the server is connected to, where TMS runs
+locally under your own logon. (From the domain controller TMS would need the
+target's TMSSUP logon, which a remote call cannot give.) The result carries
+TMS's return code and the tp steps this import added to TPALOG. It changes the
+system, so it is off unless allowed — `allow_transport_import` per system in
+`.vsp.json`, `--allow-transport-import` or `SAP_ALLOW_TRANSPORT_IMPORT=true` —
+independently of `--read-only`, which is about the repository:
+
+```bash
+vsp -s qas transport import TR-A                  # into qas, its own client
+vsp -s qas transport import TR-A --client 200 --json
+```
+
+MCP: `system` with `import_transport` (`transport`, optional `client`, `host`
+to override the RFC gateway).
+
 `vsp update` fetches the latest release for this platform, compares it with
 the running version, verifies the download against the release's
 `checksums.txt`, and puts it in place of the running binary — the old one is
