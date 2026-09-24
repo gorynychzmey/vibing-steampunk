@@ -70,9 +70,9 @@ func newTocClient(t *testing.T, source string, opts ...Option) (*Client, *tocSer
 			ts.mu.Unlock()
 			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="utf-8"?><tm:root xmlns:tm="http://www.sap.com/cts/adt/tm">`+
 				`<tm:request tm:number="TR-TOC" tm:type="T"/></tm:root>`)
-		case r.Method == http.MethodPost && strings.HasSuffix(path, "/newreleasejobs"):
+		case r.Method == http.MethodPost && (strings.HasSuffix(path, "/newreleasejobs") || strings.HasSuffix(path, "/relwithignlock")):
 			ts.mu.Lock()
-			ts.released = append(ts.released, strings.Split(strings.TrimPrefix(path, "/sap/bc/adt/cts/transportrequests/"), "/")[0])
+			ts.released = append(ts.released, strings.TrimPrefix(path, "/sap/bc/adt/cts/transportrequests/"))
 			ts.mu.Unlock()
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/transportrequests/TR-TOC"):
@@ -219,8 +219,10 @@ func TestCopyToTransportOfCopies_ReleasesWhenAsked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("copyToTransportOfCopies: %v", err)
 	}
-	if !res.Released || len(ts.released) != 1 || ts.released[0] != "TR-TOC" {
-		t.Errorf("released=%v calls=%v, want TR-TOC released", res.Released, ts.released)
+	// Its objects are locked in the original, so it is released ignoring
+	// locks -- a plain release would come back as a question.
+	if !res.Released || len(ts.released) != 1 || ts.released[0] != "TR-TOC/relwithignlock" {
+		t.Errorf("released=%v calls=%v, want TR-TOC released with relwithignlock", res.Released, ts.released)
 	}
 	if !strings.Contains(ts.created[0], `tm:desc="own title"`) {
 		t.Errorf("an explicit description was not used: %s", ts.created[0])

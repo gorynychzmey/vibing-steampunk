@@ -122,7 +122,10 @@ func (c *Client) copyToTransportOfCopies(ctx context.Context, bridge functionBri
 	}
 
 	if opts.Release {
-		if err := c.ReleaseTransportV2(ctx, number, ReleaseTransportOptions{}); err != nil {
+		// The copied objects stay locked in the original request, so a plain
+		// release comes back asking whether to release anyway -- the question
+		// SE01 asks too. For a transport of copies the answer is always yes.
+		if err := c.ReleaseTransportV2(ctx, number, ReleaseTransportOptions{IgnoreLocks: true}); err != nil {
 			return res, fmt.Errorf("%s is filled but was not released: %w", number, err)
 		}
 		res.Released = true
