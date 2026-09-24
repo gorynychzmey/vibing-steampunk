@@ -61,14 +61,18 @@ func (c *Client) noteLockClosed(handle string) {
 // lockOutstanding reports whether this client is inside a lock window, pruning
 // entries old enough that the lock they name cannot still be alive.
 func (c *Client) lockOutstanding() bool {
-	c.locks.mu.Lock()
-	defer c.locks.mu.Unlock()
+	return c.locks.outstanding()
+}
+
+func (w *lockWindow) outstanding() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	cutoff := time.Now().Add(-lockWindowMaxAge)
-	for handle, opened := range c.locks.open {
+	for handle, opened := range w.open {
 		if opened.Before(cutoff) {
-			delete(c.locks.open, handle)
+			delete(w.open, handle)
 		}
 	}
-	return len(c.locks.open) > 0
+	return len(w.open) > 0
 }

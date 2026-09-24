@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -135,6 +136,17 @@ type Transport struct {
 	// from triggering simultaneous SAML dances.
 	reauthMu   sync.Mutex
 	lastReauth time.Time
+
+	// locks is the owning client's lock window. While it holds a handle,
+	// stateless requests are kept out of the stateful context (see do).
+	locks *lockWindow
+
+	// contextMu admits one request at a time into the stateful context, and
+	// keeps a stateless request that is allowed to end the context from
+	// racing one that is using it. contextInFlight counts the stateful
+	// requests under way or waiting (see do).
+	contextMu       sync.RWMutex
+	contextInFlight atomic.Int32
 }
 
 // NewTransport creates a new Transport with the given configuration.
@@ -296,7 +308,7 @@ func (t *Transport) request(ctx context.Context, path string, opts *RequestOptio
 
 	// Execute request
 	traceHTTPRequest(req, opts.Body)
-	resp, err := t.httpClient.Do(req)
+	resp, err := t.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
@@ -436,7 +448,7 @@ func (t *Transport) retryRequest(ctx context.Context, path string, opts *Request
 	t.applyProxyContextIDGuard(req, opts)
 
 	traceHTTPRequest(req, opts.Body)
-	resp, err := t.httpClient.Do(req)
+	resp, err := t.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing retry request: %w", err)
 	}
@@ -591,7 +603,7 @@ func (t *Transport) probeCSRFToken(ctx context.Context, method string, stateful 
 	}
 
 	traceHTTPRequest(req, nil)
-	resp, err := t.httpClient.Do(req)
+	resp, err := t.do(req)
 	if err != nil {
 		return "", 0, false, fmt.Errorf("executing request: %w", err)
 	}
@@ -1043,4 +1055,60 @@ func (t *Transport) addCookies(req *http.Request) {
 	for name, value := range t.config.Cookies {
 		req.AddCookie(&http.Cookie{Name: name, Value: value})
 	}
+}
+
+// do sends a request, keeping concurrent callers of one client from breaking
+// each other's lock chains. Two things end or break the stateful ADT context a
+// lock handle is bound to, and both are the ordinary work of another caller --
+// a second agent sharing this client:
+//
+//   - A stateless request ends the context it arrives in, and the jar puts
+//     the context's sap-contextid on every request. One sent between LOCK and
+//     the write turns the write into 423 ExceptionResourceInvalidLockHandle.
+//     So while a lock is outstanding, or a stateful request is under way, a
+//     stateless request goes without the jar: it carries the session's other
+//     cookies but not sap-contextid, and the cookies its response sets are
+//     not learned. The stateful context is neither ended nor replaced.
+//   - The ICM serves a stateful context one request at a time and answers a
+//     second concurrent one with 400. The session recovery that follows drops
+//     the cookies and orphans the context together with the enqueue it holds,
+//     which then refuses every later LOCK on the object ("already editing")
+//     until the session times out. So requests into the context -- stateful
+//     ones, and unmarked ones such as the CSRF probe -- go one at a time.
+//     Chains still interleave: one context holds several locks.
+//
+// A stateless request outside any lock window still goes into the context and
+// ends it, as before -- that is how a finished chain's context is retired. It
+// holds contextMu for reading while it does, so a LOCK cannot open a window in
+// the context it is about to end; stateless requests still run side by side.
+func (t *Transport) do(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("X-sap-adt-sessiontype") == "stateless" {
+		t.contextMu.RLock()
+		if t.contextInFlight.Load() == 0 && (t.locks == nil || !t.locks.outstanding()) {
+			defer t.contextMu.RUnlock()
+			return t.httpClient.Do(req)
+		}
+		t.contextMu.RUnlock()
+		client, ok := t.httpClient.(*http.Client)
+		if !ok || client.Jar == nil {
+			return t.httpClient.Do(req)
+		}
+		for _, c := range client.Jar.Cookies(req.URL) {
+			if c.Name != "sap-contextid" {
+				req.AddCookie(c)
+			}
+		}
+		isolated := *client
+		isolated.Jar = nil
+		return isolated.Do(req)
+	}
+
+	stateful := req.Header.Get("X-sap-adt-sessiontype") == "stateful"
+	if stateful {
+		t.contextInFlight.Add(1)
+		defer t.contextInFlight.Add(-1)
+	}
+	t.contextMu.Lock()
+	defer t.contextMu.Unlock()
+	return t.httpClient.Do(req)
 }
