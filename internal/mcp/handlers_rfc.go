@@ -239,28 +239,28 @@ func (s *Server) dialRFC(ctx context.Context, params map[string]any) (*openrfc.C
 // rfcDestination resolves where an RFC call goes: this server's system, the RFC
 // settings of its .vsp.json entry, and any per-call override.
 func (s *Server) rfcDestination(params map[string]any) (saprfc.Params, error) {
+	// The RFC logon defaults to this server's own logon. SAP_USER/SAP_PASSWORD
+	// are not consulted: a .env in the working directory usually holds one
+	// system's, and every server loads it, so a server connected to another
+	// system would log on over RFC as that system's user.
 	in := saprfc.Input{
 		URL:      s.config.BaseURL,
 		User:     s.config.Username,
 		Password: s.config.Password,
 		Client:   s.config.Client,
 		Language: s.config.Language,
-		RFCUser:  os.Getenv("SAP_USER"),
-	}
-	if pwd := os.Getenv("SAP_PASSWORD"); pwd != "" {
-		in.RFCPassword = pwd
 	}
 	// Per-system RFC settings of this server's own .vsp.json system. Taking the
 	// default system's instead sent every other server to the default system's
 	// gateway, with the default system's RFC credentials.
 	if cfg, _, err := config.LoadSystems(); err == nil && cfg != nil {
-		if sys := s.ownSystem(cfg); sys != nil {
+		if name, sys, ok := s.ownSystem(cfg); ok {
 			in.RFCHost, in.RFCSysnr, in.RFCPort = sys.RFCHost, sys.RFCSysnr, sys.RFCPort
-			if sys.RFCUser != "" {
-				in.RFCUser = sys.RFCUser
-			}
-			if sys.RFCPassword != "" {
-				in.RFCPassword = sys.RFCPassword
+			// The entry as written, not GetSystem's view of it, which fills an
+			// empty rfc_user/rfc_password from SAP_USER/SAP_PASSWORD.
+			in.RFCUser, in.RFCPassword = sys.RFCUser, sys.RFCPassword
+			if in.RFCPassword == "" {
+				in.RFCPassword = os.Getenv(fmt.Sprintf("VSP_%s_RFC_PASSWORD", strings.ToUpper(name)))
 			}
 		}
 	}
@@ -272,33 +272,37 @@ func (s *Server) rfcDestination(params map[string]any) (saprfc.Params, error) {
 	return saprfc.Resolve(in)
 }
 
-// ownSystem is this server's entry in .vsp.json: the one named by -s /
-// SAP_SYSTEM, otherwise the one entry whose URL and client are this server's.
-// Nil when there is none, or more than one -- borrowing another system's
-// settings is worse than having none.
-func (s *Server) ownSystem(cfg *config.SystemsConfig) *config.SystemConfig {
+// ownSystem is this server's entry in .vsp.json, as written: the one named by
+// -s / SAP_SYSTEM, otherwise the one entry whose URL and client are this
+// server's. None when there is more than one -- borrowing another system's
+// settings is worse than having none. With no match, a default entry without
+// a URL still applies, as every default did before: an entry that only names
+// a gateway has nothing to match on.
+func (s *Server) ownSystem(cfg *config.SystemsConfig) (string, config.SystemConfig, bool) {
 	if s.config.SystemName != "" {
-		if sys, err := cfg.GetSystem(s.config.SystemName); err == nil {
-			return sys
-		}
-		return nil
+		sys, ok := cfg.Systems[s.config.SystemName]
+		return s.config.SystemName, sys, ok
 	}
 	norm := func(u string) string { return strings.ToLower(strings.TrimRight(strings.TrimSpace(u), "/")) }
-	var found *config.SystemConfig
-	for name := range cfg.Systems {
-		sys, err := cfg.GetSystem(name)
-		if err != nil || norm(sys.URL) != norm(s.config.BaseURL) {
+	found, matches := "", 0
+	for name, sys := range cfg.Systems {
+		if sys.URL == "" || norm(sys.URL) != norm(s.config.BaseURL) {
 			continue
 		}
 		if sys.Client != "" && s.config.Client != "" && sys.Client != s.config.Client {
 			continue
 		}
-		if found != nil {
-			return nil
-		}
-		found = sys
+		found, matches = name, matches+1
 	}
-	return found
+	switch {
+	case matches == 1:
+		return found, cfg.Systems[found], true
+	case matches == 0 && cfg.Default != "":
+		if sys, ok := cfg.Systems[cfg.Default]; ok && sys.URL == "" {
+			return cfg.Default, sys, true
+		}
+	}
+	return "", config.SystemConfig{}, false
 }
 
 func rfcResult(v any) (*mcp.CallToolResult, bool, error) {
