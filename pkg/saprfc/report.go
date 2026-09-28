@@ -27,12 +27,13 @@ type ReportParam struct {
 
 // JobRun is the outcome of scheduling a report.
 type JobRun struct {
-	Report    string `json:"report"`
-	JobName   string `json:"job_name"`
-	JobCount  string `json:"job_count"`
-	Status    string `json:"status,omitempty"`      // TBTCO STATUS once known
-	StatusFor string `json:"status_text,omitempty"` // human reading of that letter
-	Spool     string `json:"spool,omitempty"`       // spool list, when requested and available
+	Report    string        `json:"report"`
+	JobName   string        `json:"job_name"`
+	JobCount  string        `json:"job_count"`
+	Status    string        `json:"status,omitempty"`      // TBTCO STATUS once known
+	StatusFor string        `json:"status_text,omitempty"` // human reading of that letter
+	Spool     string        `json:"spool,omitempty"`       // spool list, when requested and available
+	JobLog    []JobLogEntry `json:"job_log,omitempty"`     // job log, when requested
 }
 
 // jobStatusText turns a TBTCO status letter into words.
@@ -65,7 +66,23 @@ func jobStatusText(s string) string {
 // scheduler interface: they take the target server explicitly, so they work where
 // SUBST does not, and they carry a BAPIRET2 that says what went wrong.
 func RunReport(ctx context.Context, c *rfc.Client, report, jobName string, params []ReportParam, wait time.Duration) (*JobRun, error) {
-	report = strings.ToUpper(strings.TrimSpace(report))
+	return RunReportWith(ctx, c, ReportRequest{Report: report, JobName: jobName, Params: params, Wait: wait})
+}
+
+// ReportRequest is one report run: the report, the job it runs in, and what it
+// runs with -- a saved variant, selection values, or both (the values then
+// override the variant's).
+type ReportRequest struct {
+	Report  string
+	JobName string // defaults to VSP_<REPORT>
+	Variant string
+	Params  []ReportParam
+	Wait    time.Duration // how long to wait for the job to end; zero returns at once
+}
+
+// RunReportWith runs a report as a background job through the XBP interface.
+func RunReportWith(ctx context.Context, c *rfc.Client, r ReportRequest) (*JobRun, error) {
+	report, jobName, params, wait := strings.ToUpper(strings.TrimSpace(r.Report)), r.JobName, r.Params, r.Wait
 	if report == "" {
 		return nil, fmt.Errorf("a report name is required")
 	}
@@ -94,25 +111,16 @@ func RunReport(ctx context.Context, c *rfc.Client, report, jobName string, param
 	}
 	run.JobCount = strings.TrimSpace(fmt.Sprint(opened.Get("JOBCOUNT")))
 
-	step := rfc.Params{
-		"JOBNAME": jobName, "JOBCOUNT": run.JobCount,
-		"EXTERNAL_USER_NAME": xbpUser, "ABAP_PROGRAM_NAME": report,
-		// Without print parameters a background step writes its list nowhere and
-		// TBTCP-LISTIDENT stays 0, so there is nothing to read afterwards.
-		// ALLPRIPAR is the classic PRI_PARAMS set: hold the request on the default
-		// device rather than printing it.
-		"ALLPRIPAR": map[string]any{
-			"PDEST": printDestination, // spool device
-			"PRIMM": " ",              // do not print immediately
-			"PRREL": " ",              // keep the request after printing
-			"PEXPI": "8",              // days before it expires
-			"LINSZ": 255,
-			"LINCT": 65,
-		},
-	}
-	if rows := selectionRows(params); len(rows) > 0 {
-		step["SELINFO"] = rows
-	}
+	// A job that was opened but never started stays in SM37 as "scheduled"
+	// forever. If anything below fails before the start, take it out again.
+	started := false
+	defer func() {
+		if !started {
+			_ = deleteJob(ctx, c, jobName, run.JobCount)
+		}
+	}()
+
+	step := abapStep(jobName, run.JobCount, report, r.Variant, params)
 	added, err := c.Call(ctx, "BAPI_XBP_JOB_ADD_ABAP_STEP", step)
 	if err != nil {
 		return run, fmt.Errorf("BAPI_XBP_JOB_ADD_ABAP_STEP: %w", err)
@@ -125,16 +133,17 @@ func RunReport(ctx context.Context, c *rfc.Client, report, jobName string, param
 	if err != nil {
 		return run, err
 	}
-	started, err := c.Call(ctx, "BAPI_XBP_JOB_START_ASAP", rfc.Params{
+	start, err := c.Call(ctx, "BAPI_XBP_JOB_START_ASAP", rfc.Params{
 		"JOBNAME": jobName, "JOBCOUNT": run.JobCount,
 		"EXTERNAL_USER_NAME": xbpUser, "TARGET_SERVER": server,
 	})
 	if err != nil {
 		return run, fmt.Errorf("BAPI_XBP_JOB_START_ASAP: %w", err)
 	}
-	if err := bapiError("BAPI_XBP_JOB_START_ASAP", started.Get("RETURN")); err != nil {
+	if err := bapiError("BAPI_XBP_JOB_START_ASAP", start.Get("RETURN")); err != nil {
 		return run, err
 	}
+	started = true
 
 	if wait <= 0 {
 		return run, nil
@@ -143,7 +152,7 @@ func RunReport(ctx context.Context, c *rfc.Client, report, jobName string, param
 	for {
 		status, err := jobStatus(ctx, c, run.JobName, run.JobCount)
 		if err != nil {
-			return run, err
+			return run, fmt.Errorf("job %s / %s started, but %w", run.JobName, run.JobCount, err)
 		}
 		run.Status, run.StatusFor = status, jobStatusText(status)
 		// P scheduled, S released, R running, Y ready — anything else is terminal.
@@ -159,6 +168,53 @@ func RunReport(ctx context.Context, c *rfc.Client, report, jobName string, param
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// abapStep is the BAPI_XBP_JOB_ADD_ABAP_STEP input for one report step.
+func abapStep(jobName, jobCount, report, variant string, params []ReportParam) rfc.Params {
+	step := rfc.Params{
+		"JOBNAME": jobName, "JOBCOUNT": jobCount,
+		"EXTERNAL_USER_NAME": xbpUser, "ABAP_PROGRAM_NAME": report,
+		// Without print parameters a background step writes its list nowhere and
+		// TBTCP-LISTIDENT stays 0, so there is nothing to read afterwards.
+		// ALLPRIPAR is the classic PRI_PARAMS set: hold the request on the default
+		// device rather than printing it.
+		"ALLPRIPAR": map[string]any{
+			"PDEST": printDestination, // spool device
+			"PRIMM": " ",              // do not print immediately
+			"PRREL": " ",              // keep the request after printing
+			"PEXPI": "8",              // days before it expires
+			"LINSZ": 255,
+			"LINCT": 65,
+		},
+	}
+	if variant = strings.ToUpper(strings.TrimSpace(variant)); variant != "" {
+		step["ABAP_VARIANT_NAME"] = variant
+	}
+	if rows := selectionRows(params); len(rows) > 0 {
+		step["SELINFO"] = rows
+	}
+	return step
+}
+
+// deleteJob removes a job through XBP. It runs inside the caller's XMI session.
+func deleteJob(ctx context.Context, c *rfc.Client, jobName, jobCount string) error {
+	res, err := c.Call(ctx, "BAPI_XBP_JOB_DELETE", rfc.Params{
+		"JOBNAME": jobName, "JOBCOUNT": jobCount, "EXTERNAL_USER_NAME": xbpUser,
+	})
+	if err != nil {
+		return fmt.Errorf("BAPI_XBP_JOB_DELETE: %w", err)
+	}
+	return bapiError("BAPI_XBP_JOB_DELETE", res.Get("RETURN"))
+}
+
+// DeleteJob removes a job that has not started, or has ended.
+func DeleteJob(ctx context.Context, c *rfc.Client, jobName, jobCount string) error {
+	if err := xmiLogon(ctx, c); err != nil {
+		return err
+	}
+	defer func() { _, _ = c.Call(ctx, "BAPI_XMI_LOGOFF", rfc.Params{"INTERFACE": "XBP"}) }()
+	return deleteJob(ctx, c, jobName, jobCount)
 }
 
 // xbpUser is the external scheduler identity XBP records against the job.
@@ -221,6 +277,12 @@ func bapiError(call string, ret any) error {
 		msg = fmt.Sprintf("%v%v", m["ID"], m["NUMBER"])
 	}
 	return fmt.Errorf("%s: %s", call, msg)
+}
+
+// JobStatus reads one job's TBTCO status letter and its reading in words.
+func JobStatus(ctx context.Context, c *rfc.Client, jobName, jobCount string) (string, string, error) {
+	status, err := jobStatus(ctx, c, jobName, jobCount)
+	return status, jobStatusText(status), err
 }
 
 // jobStatus reads one job's TBTCO status.

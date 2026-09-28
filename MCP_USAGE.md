@@ -539,8 +539,13 @@ SAP(action="rfc", target="BAPI_USER_*", params={"op":"search"})
 SAP(action="rfc", target="STFC_CONNECTION")                describe (default with a target)
 SAP(action="rfc", target="Z_DOUBLE", params={"op":"call","args":{"N":21}})
 SAP(action="rfc", target="T000", params={"op":"read_table","fields":["MANDT"],"top":5})
+SAP(action="rfc", target="ZREPORT", params={"op":"run","variant":"DEFAULT"})   background job: status, spool, job log
+SAP(action="rfc", target="VSP_ZREPORT", params={"op":"job","job_count":"12345678"})   a job still running after "wait"
 ```
 
-Ops: `info`, `ping`, `describe`, `call`, `search`, `read_table`. Destination overrides
+Ops: `info`, `ping`, `describe`, `call`, `search`, `read_table`, `run`, `job`. `run`
+takes `variant`, `params` (`{"P_WERKS":"1000","S_MATNR":["M1","M2"]}` or RSPARAMS
+rows), `wait` (seconds, default 60, at most 300), `job_name`, and `spool`/`joblog`
+(both default true). Destination overrides
 in `params`: `host`, `sysnr`, `port`, `user` — otherwise the host and system number
 come from the configured ADT URL and the gateway is `3300 + sysnr`.
