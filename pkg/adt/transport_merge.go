@@ -151,6 +151,9 @@ func (c *Client) MoveTransportObject(ctx context.Context, ws *DebugWebSocketClie
 		return out, fmt.Errorf("reading %s: %w", to, err)
 	}
 	out.ToTask = taskFor(target, strings.ToUpper(c.config.Username))
+	if _, err := classifyTask(ctx, ws, c.requestHeader, target, out.ToTask); err != nil {
+		return out, err
+	}
 
 	entry := map[string]any{"PGMID": key.PgmID, "OBJECT": key.Object, "OBJ_NAME": key.Name}
 	res, err := ws.CallRFC(ctx, "TR_APPEND_TO_COMM_OBJS_KEYS", map[string]any{
