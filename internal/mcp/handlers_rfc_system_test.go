@@ -102,3 +102,60 @@ func TestRFCDestination_TheDefaultSystemStillGetsItsSettings(t *testing.T) {
 		t.Errorf("host %q user %q, want dev-gw.example.local / DEVRFC", dest.Host, dest.User)
 	}
 }
+
+// A server connected to one system logs on over RFC as itself, not as the
+// SAP_USER a .env of another system puts into every server's environment.
+func TestRFCDestination_TheLogonIsTheServersOwnNotSAPUser(t *testing.T) {
+	s := serverFor(t, "https://elsewhere.example:44300", "100", "prodsys-a")
+	s.config.Username, s.config.Password = "READER", "reader-secret"
+	t.Setenv("SAP_USER", "OTHERSYS")
+	t.Setenv("SAP_PASSWORD", "other-secret")
+
+	dest, err := s.rfcDestination(map[string]any{})
+	if err != nil {
+		t.Fatalf("rfcDestination: %v", err)
+	}
+	if dest.Host != "prod-gw.example.local" {
+		t.Errorf("host = %q, want the named system's gateway", dest.Host)
+	}
+	if dest.User != "READER" || string(dest.Password) != "reader-secret" {
+		t.Errorf("RFC logon = %q, want the server's own READER, not SAP_USER", dest.User)
+	}
+}
+
+// The system's own rfc_password may come from VSP_<SYSTEM>_RFC_PASSWORD.
+func TestRFCDestination_TheSystemsRFCPasswordVariable(t *testing.T) {
+	s := serverFor(t, "https://prodsys-a.example:44300", "100", "")
+	t.Setenv("VSP_PRODSYS-A_RFC_PASSWORD", "rfc-secret")
+
+	dest, err := s.rfcDestination(map[string]any{})
+	if err != nil {
+		t.Fatalf("rfcDestination: %v", err)
+	}
+	if string(dest.Password) != "rfc-secret" {
+		t.Errorf("password not taken from VSP_PRODSYS-A_RFC_PASSWORD")
+	}
+}
+
+// An entry that only names a gateway has no URL to match on. As the default,
+// it still applies to a server that matches nothing else, as it did before.
+func TestRFCDestination_AURLlessDefaultStillApplies(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `{"default": "gw", "systems": {
+	  "gw":    {"rfc_host": "gw.example.local", "rfc_sysnr": "00"},
+	  "other": {"url": "https://other.example:44300", "client": "100", "rfc_host": "other-gw.example.local"}
+	}}`
+	if err := os.WriteFile(filepath.Join(dir, ".vsp.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	s := &Server{config: &Config{BaseURL: "https://sap.example:44300", Client: "100", Username: "TESTUSER", Password: "test-secret"}}
+
+	dest, err := s.rfcDestination(map[string]any{})
+	if err != nil {
+		t.Fatalf("rfcDestination: %v", err)
+	}
+	if dest.Host != "gw.example.local" {
+		t.Errorf("host = %q, want the URL-less default's gw.example.local", dest.Host)
+	}
+}
