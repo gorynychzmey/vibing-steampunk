@@ -290,6 +290,29 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 		}
 	}
 
+	// The wrapper ends every run that reaches its end in the assertion that
+	// carries the marker, so a run without one never got there. ABAP Unit says
+	// why only in a warning -- a test class above the system's risk level is
+	// "not executed", with severity "tolerable" -- and read as success that
+	// warning was the whole report of a run that never happened.
+	if result.Failure == nil && len(testResult.Classes) > 0 && !anyExecResult(result.RawAlerts) && PayloadFailure(result.RawAlerts) == nil {
+		result.Failure = &ExecuteFailure{
+			Kind:  ExecuteFailureNotRun,
+			Title: "ABAP Unit did not run the code to its end",
+			Details: []string{
+				fmt.Sprintf("%s activated, but the closing assertion that every completed run ends in never came back.", programName),
+			},
+		}
+		for _, alert := range result.RawAlerts {
+			result.Failure.Details = append(result.Failure.Details, alert.Title)
+			result.Failure.Details = append(result.Failure.Details, alert.Details...)
+			if result.Failure.Severity == "" {
+				result.Failure.Title = alert.Title
+				result.Failure.Severity = alert.Severity
+			}
+		}
+	}
+
 	if alert := PayloadFailure(result.RawAlerts); alert != nil {
 		result.Failure = &ExecuteFailure{
 			Kind:     alert.Kind,
@@ -372,6 +395,17 @@ func PayloadFailure(alerts []UnitTestAlert) *UnitTestAlert {
 		}
 	}
 	return fallback
+}
+
+// anyExecResult reports whether any alert is the closing assertion, that is
+// whether the payload ran to its end.
+func anyExecResult(alerts []UnitTestAlert) bool {
+	for _, a := range alerts {
+		if carriesExecResult(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // carriesExecResult reports whether an alert is the closing assertion that
