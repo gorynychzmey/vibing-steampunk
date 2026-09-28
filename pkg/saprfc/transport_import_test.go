@@ -142,3 +142,45 @@ func TestImportRequests_RefusesBeforeCalling(t *testing.T) {
 		})
 	}
 }
+
+// An import followed after the fact: TPALOG's steps for each request, only
+// those of this run when since is given, with the worst return code.
+func TestImportLogs_StepsSinceAGivenTime(t *testing.T) {
+	sys := &fakeSystem{sid: "PRD", logBefore: []string{
+		"TR-EXAMPLE|100|I|0000|20260101100000",
+		"TR-EXAMPLE|ALL|L|0000|20260102100000",
+		"TR-EXAMPLE|100|I|0008|20260102100005",
+	}}
+	logs, err := importLogs(context.Background(), sys.call, []string{"tr-example", "TR-OTHER"}, "20260102000000")
+	if err != nil {
+		t.Fatalf("importLogs: %v", err)
+	}
+	if len(logs) != 2 || logs[0].Request != "TR-EXAMPLE" || logs[1].Request != "TR-OTHER" {
+		t.Fatalf("logs = %+v", logs)
+	}
+	if len(logs[0].Steps) != 2 || logs[0].MaxRC != "0008" {
+		t.Errorf("TR-EXAMPLE = %+v, want the two steps since the 2nd and rc 0008", logs[0])
+	}
+	if len(logs[1].Steps) != 0 || logs[1].MaxRC != "" {
+		t.Errorf("TR-OTHER = %+v, want no steps", logs[1])
+	}
+}
+
+func TestImportLogs_RefusesBeforeReading(t *testing.T) {
+	for name, tc := range map[string]struct {
+		reqs  []string
+		since string
+	}{
+		"no request":  {nil, ""},
+		"bad request": {[]string{"X' OR '1'='1"}, ""},
+		"bad since":   {[]string{"TR-EXAMPLE"}, "yesterday"},
+	} {
+		sys := &fakeSystem{sid: "PRD"}
+		if _, err := importLogs(context.Background(), sys.call, tc.reqs, tc.since); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+		if len(sys.calls) != 0 {
+			t.Errorf("%s: read before refusing", name)
+		}
+	}
+}

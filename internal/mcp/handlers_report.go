@@ -268,6 +268,9 @@ func (s *Server) handleRunReportAsync(ctx context.Context, request mcp.CallToolR
 	return mcp.NewToolResultText(string(outputJSON)), nil
 }
 
+// maxAsyncWait caps how long one GET_ASYNC_RESULT call blocks.
+const maxAsyncWait = 30 * time.Minute
+
 func (s *Server) handleGetAsyncResult(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	taskID, _ := request.GetArguments()["task_id"].(string)
 	if taskID == "" {
@@ -275,10 +278,19 @@ func (s *Server) handleGetAsyncResult(ctx context.Context, request mcp.CallToolR
 	}
 
 	wait, _ := request.GetArguments()["wait"].(bool)
+	waitFor := 60 * time.Second
+	// wait_seconds waits longer than the minute "wait" gives: an import into
+	// production runs for many minutes.
+	if secs, ok := request.GetArguments()["wait_seconds"].(float64); ok && secs > 0 {
+		wait, waitFor = true, time.Duration(secs*float64(time.Second))
+		if waitFor > maxAsyncWait {
+			waitFor = maxAsyncWait
+		}
+	}
 
 	if wait {
 		// Block until complete or timeout
-		timeout := time.After(60 * time.Second)
+		timeout := time.After(waitFor)
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
@@ -298,7 +310,12 @@ func (s *Server) handleGetAsyncResult(ctx context.Context, request mcp.CallToolR
 
 			select {
 			case <-timeout:
-				return newToolResultError("Timeout waiting for task completion"), nil
+				// Still running is an answer, not an error: say so with the task.
+				s.asyncTasksMu.RLock()
+				taskCopy := *task
+				s.asyncTasksMu.RUnlock()
+				output, _ := json.MarshalIndent(taskCopy, "", "  ")
+				return mcp.NewToolResultText(string(output)), nil
 			case <-ticker.C:
 				continue
 			case <-ctx.Done():

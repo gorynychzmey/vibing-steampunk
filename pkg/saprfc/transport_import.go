@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/oisee/open-rfc-go/rfc"
 )
@@ -31,6 +32,12 @@ func clientCall(c *rfc.Client) callFn {
 		return c.Call(ctx, fm, in)
 	}
 }
+
+// ImportTimeout is how long a caller should let an import call run. tp works
+// while CTS_API_IMPORT_CHANGE_REQUEST waits, and a production import can take
+// many minutes; a client that gives up after the library's default of 30 s
+// reports a failure for an import that goes on to finish.
+const ImportTimeout = 60 * time.Minute
 
 // ImportStep is one tp step of an import, as TPALOG records it.
 type ImportStep struct {
@@ -153,6 +160,59 @@ func importRequests(ctx context.Context, call callFn, requests []string, client 
 		return res, fmt.Errorf("imported, but reading TPALOG afterwards failed: %w", lerr)
 	}
 	return res, nil
+}
+
+// ImportLog is what TPALOG holds for one request: its tp steps, oldest first,
+// and the worst return code among them.
+type ImportLog struct {
+	Request string       `json:"request"`
+	Steps   []ImportStep `json:"steps"`
+	MaxRC   string       `json:"maxRc,omitempty"`
+}
+
+// ReadImportLog reads the tp steps TPALOG holds for the requests, optionally
+// only those at or after since (YYYYMMDDhhmmss). It is how an import that was
+// started without waiting, or whose caller gave up, is followed: TPALOG is
+// the system's own record and outlives the call.
+func ReadImportLog(ctx context.Context, c *rfc.Client, requests []string, since string) ([]ImportLog, error) {
+	return importLogs(ctx, clientCall(c), requests, since)
+}
+
+func importLogs(ctx context.Context, call callFn, requests []string, since string) ([]ImportLog, error) {
+	var reqs []string
+	for _, r := range requests {
+		r = strings.ToUpper(strings.TrimSpace(r))
+		if !requestPattern.MatchString(r) {
+			return nil, fmt.Errorf("%q is not a request number", r)
+		}
+		reqs = append(reqs, r)
+	}
+	if len(reqs) == 0 {
+		return nil, fmt.Errorf("at least one request is required")
+	}
+	since = strings.TrimSpace(since)
+	if since != "" && !regexp.MustCompile(`^[0-9]{8,14}$`).MatchString(since) {
+		return nil, fmt.Errorf("since %q: want YYYYMMDD[hhmmss]", since)
+	}
+	byReq, err := readImportLog(ctx, call, reqs)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ImportLog, 0, len(reqs))
+	for _, r := range reqs {
+		l := ImportLog{Request: r, Steps: []ImportStep{}}
+		for _, st := range byReq[r] {
+			if since != "" && st.Time < since {
+				continue
+			}
+			l.Steps = append(l.Steps, st)
+			if st.RetCode > l.MaxRC {
+				l.MaxRC = st.RetCode
+			}
+		}
+		out = append(out, l)
+	}
+	return out, nil
 }
 
 // readImportLog reads the TPALOG rows of the requests, by request, in order.

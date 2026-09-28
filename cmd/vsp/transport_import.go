@@ -40,7 +40,8 @@ independently of read_only.
 			client = params.Client
 		}
 		asJSON, _ := cmd.Flags().GetBool("json")
-		return withRFC(cmd, func(ctx context.Context, c *rfc.Client) error {
+		timeout, _ := cmd.Flags().GetDuration("timeout")
+		return withRFCTimeout(cmd, timeout, func(ctx context.Context, c *rfc.Client) error {
 			res, ierr := saprfc.ImportRequests(ctx, c, args, client)
 			if asJSON && res != nil {
 				if perr := printJSON(res); perr != nil {
@@ -62,5 +63,6 @@ func init() {
 	transportImportCmd.Flags().String("client", "", "Target client (default: the system's client)")
 	transportImportCmd.Flags().String("rfc-host", "", "RFC gateway host (default: rfc_host or the host of the system URL)")
 	transportImportCmd.Flags().Bool("json", false, "Emit JSON")
+	transportImportCmd.Flags().Duration("timeout", saprfc.ImportTimeout, "How long to wait for the import (tp runs while the call waits)")
 	transportCmd.AddCommand(transportImportCmd)
 }

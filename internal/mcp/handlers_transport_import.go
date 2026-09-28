@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oisee/vibing-steampunk/pkg/saprfc"
@@ -32,17 +33,100 @@ func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallTool
 		client = s.config.Client
 	}
 
-	c, release, err := s.rfcClientFor(ctx, args)
+	timeout := saprfc.ImportTimeout
+	if secs := intParam(args, "timeout", 0); secs > 0 {
+		timeout = time.Duration(secs) * time.Second
+	}
+	// The import gets a connection of its own: the shared one gives up after
+	// the library's 30 s, and a production import runs far longer than that.
+	dest, err := s.rfcDestination(args)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("importing needs classic RFC to this system: %v", err)), nil
 	}
-	defer release()
+	run := func(ctx context.Context) (*saprfc.ImportResult, error) {
+		c, err := saprfc.OpenWithTimeout(ctx, dest, timeout)
+		if err != nil {
+			return nil, fmt.Errorf("RFC logon to %s:%d failed: %w", dest.Host, dest.Port, err)
+		}
+		defer func() { _ = c.Close(context.Background()) }()
+		return saprfc.ImportRequests(ctx, c, requests, client)
+	}
 
-	res, err := saprfc.ImportRequests(ctx, c, requests, client)
+	if async, _ := getBoolParam(args, "async"); async {
+		return newToolResultJSON(s.startImport(run, requests, client, timeout)), nil
+	}
+	res, err := run(ctx)
 	if err != nil {
 		return newToolResultJSON(map[string]any{"error": err.Error(), "result": res}), nil
 	}
 	return newToolResultJSON(res), nil
+}
+
+// startImport runs an import in the background and returns at once, with the
+// task to follow it by. The import outlives the tool call; it is bounded by
+// its own timeout, not by the request that started it.
+func (s *Server) startImport(run func(context.Context) (*saprfc.ImportResult, error), requests []string, client string, timeout time.Duration) map[string]any {
+	started := time.Now()
+	s.asyncTasksMu.Lock()
+	s.asyncTaskID++
+	taskID := fmt.Sprintf("import_%d_%d", started.Unix(), s.asyncTaskID)
+	task := &AsyncTask{ID: taskID, Type: "import", Status: "running", StartedAt: started}
+	s.asyncTasks[taskID] = task
+	s.asyncTasksMu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Minute)
+		defer cancel()
+		res, err := run(ctx)
+		s.asyncTasksMu.Lock()
+		defer s.asyncTasksMu.Unlock()
+		now := time.Now()
+		task.EndedAt = &now
+		task.Result = res
+		if err != nil {
+			task.Status = "error"
+			task.Error = err.Error()
+			return
+		}
+		task.Status = "completed"
+	}()
+
+	return map[string]any{
+		"task_id":  taskID,
+		"status":   "started",
+		"requests": requests,
+		"client":   client,
+		"since":    started.Format("20060102150405"),
+		"follow":   fmt.Sprintf(`SAP(action="debug", target="GET_ASYNC_RESULT", params={"task_id": %q, "wait_seconds": 600})`, taskID),
+		"log": fmt.Sprintf(`SAP(action="system", params={"type": "import_status", "transport": %q, "since": %q})`,
+			strings.Join(requests, ","), started.Format("20060102150405")),
+	}
+}
+
+// handleImportStatus reports what TPALOG holds for requests -- the tp steps of
+// their imports into this system, and the worst return code:
+// SAP(action="system", params={"type": "import_status", "transport": "TR-A", "since": "20260101120000"}).
+// It needs nothing from the call that started the import, so it works after a
+// restart too.
+func (s *Server) handleImportStatus(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+	requests := transportList(args["transport"])
+	if len(requests) == 0 {
+		requests = transportList(args["transports"])
+	}
+	if len(requests) == 0 {
+		return newToolResultError("transport (one request, a comma-separated list or an array) is required"), nil
+	}
+	c, release, err := s.rfcClientFor(ctx, args)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("reading TPALOG needs classic RFC to this system: %v", err)), nil
+	}
+	defer release()
+	logs, err := saprfc.ReadImportLog(ctx, c, requests, getStringParam(args, "since"))
+	if err != nil {
+		return newToolResultError(err.Error()), nil
+	}
+	return newToolResultJSON(logs), nil
 }
 
 // transportList reads one request, a comma-separated list, or an array.
