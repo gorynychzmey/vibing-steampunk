@@ -43,6 +43,8 @@ func (s *Server) routeCRUDAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleCreateTable, params)
 		case "CLONE":
 			return s.callHandler(ctx, s.handleCloneObject, params)
+		case "ENHO":
+			return s.callHandler(ctx, s.handleCreateSourceCodePlugin, params)
 		}
 	}
 

@@ -35,6 +35,8 @@ func (s *Server) routeReadAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleGetTable, map[string]any{"table_name": objectName})
 		case "DEVC":
 			return s.callHandler(ctx, s.handleGetPackage, map[string]any{"package_name": objectName})
+		case "ENHANCEMENT_OPTIONS":
+			return s.callHandler(ctx, s.handleEnhancementOptions, params)
 		case "MSAG":
 			return s.callHandler(ctx, s.handleGetMessages, map[string]any{"message_class": objectName})
 		case "TRAN":

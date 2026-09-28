@@ -88,6 +88,12 @@ Create object:
   SAP(action="create", target="TABL", params={"name": "ZTABLE", "description": "New table", "fields": "[...]", "package": "$TMP"})
   SAP(action="create", target="CLONE", params={"object_type": "CLAS", "source_name": "ZCL_OLD", "target_name": "ZCL_NEW", "package": "$TMP"})
 
+Enhancement implementation (source code plug-in, ENHO): list the options, then create one --
+  SAP(action="read", target="ENHANCEMENT_OPTIONS", params={"function_module": "BAPI_X"})   (or object_url, function_group, program, class; "filter")
+  SAP(action="create", target="ENHO", params={"name": "ZENH_DEMO", "description": "Demo", "package": "ZPKG", "transport": "A4HK900001",
+      "function_module": "BAPI_X", "option": "\\FU:BAPI_X\\SE:BEGIN\\EI", "source": "ENHANCEMENT 1  .\n  ...\nENDENHANCEMENT."})
+  Without "source" it is created inactive with an empty ENHANCEMENT block; with it the code is written and activated.
+
 Class test include:
   SAP(action="create", target="CLAS_TEST_INCLUDE", params={"class_name": "ZCL_TEST", "lock_handle": "..."})
 
