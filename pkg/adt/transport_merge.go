@@ -138,7 +138,7 @@ func (c *Client) MoveTransportObject(ctx context.Context, ws *DebugWebSocketClie
 	}
 	out := &TransportMoveResult{Object: key, From: from, To: to}
 
-	source, err := c.GetTransport(ctx, from)
+	source, err := c.transportTree(ctx, from)
 	if err != nil {
 		return out, fmt.Errorf("reading %s: %w", from, err)
 	}
@@ -146,7 +146,7 @@ func (c *Client) MoveTransportObject(ctx context.Context, ws *DebugWebSocketClie
 	if out.FromTask == "" {
 		return out, fmt.Errorf("%s is not in %s", key, from)
 	}
-	target, err := c.GetTransport(ctx, to)
+	target, err := c.transportTree(ctx, to)
 	if err != nil {
 		return out, fmt.Errorf("reading %s: %w", to, err)
 	}

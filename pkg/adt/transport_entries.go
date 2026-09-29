@@ -55,7 +55,7 @@ func (c *Client) AddTransportObjects(ctx context.Context, ws *DebugWebSocketClie
 	if ws == nil || !ws.IsConnected() {
 		return nil, fmt.Errorf("adding entries to a request needs ZADT_VSP's function bridge (a WebSocket to the system)")
 	}
-	details, err := c.GetTransport(ctx, request)
+	details, err := c.transportTree(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", request, err)
 	}
@@ -231,7 +231,7 @@ func (c *Client) RemoveTransportObject(ctx context.Context, ws *DebugWebSocketCl
 	if ws == nil || !ws.IsConnected() {
 		return nil, fmt.Errorf("removing an entry from a request needs ZADT_VSP's function bridge (a WebSocket to the system)")
 	}
-	details, err := c.GetTransport(ctx, request)
+	details, err := c.transportTree(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", request, err)
 	}
@@ -258,4 +258,19 @@ func removeTransportObject(ctx context.Context, bridge organizerBridge, details 
 	}
 	out.Removed = true
 	return out, nil
+}
+
+// transportTree reads a request with its tasks and their entries. Asked for a
+// task, ADT answers with the header of the request the task belongs to and
+// neither tasks nor entries -- so a task number, which SE09 accepts anywhere
+// a request goes, found nothing. The request is then read under its own number.
+func (c *Client) transportTree(ctx context.Context, number string) (*TransportDetails, error) {
+	details, err := c.GetTransport(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	if details.Number != "" && !strings.EqualFold(details.Number, strings.TrimSpace(number)) {
+		return c.GetTransport(ctx, details.Number)
+	}
+	return details, nil
 }

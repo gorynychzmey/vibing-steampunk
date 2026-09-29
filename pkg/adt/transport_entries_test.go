@@ -169,3 +169,40 @@ func TestAddTransportObjects_ClassifiesAnUnclassifiedTaskFirst(t *testing.T) {
 		t.Errorf("result does not say the task was classified: %+v", res)
 	}
 }
+
+func TestTransportTree_ReadsTheRequestOfATask(t *testing.T) {
+	header := `<?xml version="1.0" encoding="utf-8"?>
+<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm">
+  <tm:request tm:number="DEVK900001" tm:owner="DEVELOPER" tm:desc="Demo" tm:status="D"/>
+</tm:root>`
+	full := `<?xml version="1.0" encoding="utf-8"?>
+<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm">
+  <tm:request tm:number="DEVK900001" tm:owner="DEVELOPER" tm:desc="Demo" tm:status="D">
+    <tm:task tm:number="DEVK900002" tm:owner="DEVELOPER" tm:desc="Demo" tm:status="D">
+      <tm:abap_object tm:pgmid="R3TR" tm:type="PROG" tm:name="ZDEMO"/>
+    </tm:task>
+  </tm:request>
+</tm:root>`
+	c, mock := newTransportTestClient(t, map[string][]string{
+		"/sap/bc/adt/cts/transportrequests/DEVK900002": {header},
+		"/sap/bc/adt/cts/transportrequests/DEVK900001": {full},
+	})
+	details, err := c.transportTree(context.Background(), "DEVK900002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := holderOf(details, TransportObjectKey{PgmID: "R3TR", Object: "PROG", Name: "ZDEMO"}); got != "DEVK900002" {
+		t.Errorf("entry found in %q, want the task DEVK900002", got)
+	}
+	if len(mock.requests) != 2 {
+		t.Errorf("%d reads, want the task and then its request", len(mock.requests))
+	}
+
+	c, mock = newTransportTestClient(t, map[string][]string{"/sap/bc/adt/cts/transportrequests/DEVK900001": {full}})
+	if _, err := c.transportTree(context.Background(), "DEVK900001"); err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.requests) != 1 {
+		t.Errorf("a request number was read %d times, want once", len(mock.requests))
+	}
+}
