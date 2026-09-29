@@ -146,6 +146,51 @@ func (s *Server) handleCreateSourceCodePlugin(ctx context.Context, request mcp.C
 	return newToolResultJSON(out), nil
 }
 
+// handleCreateBadiImplementation creates an ENHO with one BAdI implementation
+// and activates it:
+// SAP(action="create", target="BADI_IMPL", params={"name": "ZENH_DEMO", "description": "...",
+//
+//	"package": "ZPKG", "spot": "BADI_X", "class": "ZCL_DEMO_BADI"}).
+//
+// "badi" names the BAdI when the spot holds more than one; "active": false
+// creates the implementation switched off; "activate": false leaves the ENHO
+// inactive.
+func (s *Server) handleCreateBadiImplementation(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+	opts := adt.BadiImplementationOptions{
+		Name:              getStringParam(args, "name"),
+		Description:       getStringParam(args, "description"),
+		Package:           firstNonEmptyParam(args, "package", "package_name"),
+		Transport:         getStringParam(args, "transport"),
+		Spot:              firstNonEmptyParam(args, "spot", "enhancement_spot"),
+		BadiDefinition:    firstNonEmptyParam(args, "badi", "badi_definition"),
+		ImplementingClass: firstNonEmptyParam(args, "class", "implementing_class"),
+		Implementation:    getStringParam(args, "implementation"),
+		ShortText:         getStringParam(args, "short_text"),
+	}
+	if active, ok := getBoolParam(args, "active"); ok && !active {
+		opts.Inactive = true
+	}
+	enhoURL, err := s.adtClient.CreateBadiImplementation(ctx, opts)
+	if err != nil {
+		if enhoURL != "" {
+			return newToolResultJSON(map[string]any{"object_url": enhoURL, "error": err.Error()}), nil
+		}
+		return newToolResultError(err.Error()), nil
+	}
+	out := map[string]any{"object_url": enhoURL, "spot": strings.ToUpper(opts.Spot), "class": strings.ToUpper(opts.ImplementingClass)}
+	if activate, ok := getBoolParam(args, "activate"); ok && !activate {
+		out["message"] = "created inactive; activate " + enhoURL + " to put the implementation in force"
+		return newToolResultJSON(out), nil
+	}
+	activation, err := s.adtClient.Activate(ctx, enhoURL, strings.ToUpper(opts.Name))
+	out["activation"] = activation
+	if err != nil {
+		out["error"] = fmt.Sprintf("created, but activation failed: %v", err)
+	}
+	return newToolResultJSON(out), nil
+}
+
 func firstNonEmptyParam(args map[string]any, keys ...string) string {
 	for _, k := range keys {
 		if v := strings.TrimSpace(getStringParam(args, k)); v != "" {

@@ -45,6 +45,8 @@ func (s *Server) routeCRUDAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleCloneObject, params)
 		case "ENHO":
 			return s.callHandler(ctx, s.handleCreateSourceCodePlugin, params)
+		case "BADI_IMPL":
+			return s.callHandler(ctx, s.handleCreateBadiImplementation, params)
 		}
 	}
 

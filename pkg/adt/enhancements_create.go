@@ -163,30 +163,11 @@ func (c *Client) CreateSourceCodePlugin(ctx context.Context, opts SourceCodePlug
 	}
 	objectURL := enhoxhhCollection + "/" + url.PathEscape(strings.ToLower(opts.Name))
 
-	if err := c.checkMutation(ctx, MutationContext{
-		Op:        OpCreate,
-		OpName:    "CreateSourceCodePlugin",
-		Package:   opts.Package,
-		Transport: opts.Transport,
-	}); err != nil {
+	transport, err := c.enhancementCreateGates(ctx, "CreateSourceCodePlugin", opts.Package, opts.Transport, objectURL)
+	if err != nil {
 		return "", err
 	}
-	if opts.Transport == "" && !strings.HasPrefix(opts.Package, "$") && c.config.Safety.TransportChoice != "off" {
-		choice := c.planTransport(ctx, "", objectURL, opts.Package)
-		if choice.Err != nil {
-			return "", choice.Err
-		}
-		if choice.Transport != "" {
-			if err := c.checkTransportableEdit(choice.Transport, "CreateSourceCodePlugin"); err != nil {
-				return "", err
-			}
-			opts.Transport = choice.Transport
-		}
-	}
-	// As in CreateObject: a missing package leaves an orphan enqueue behind.
-	if !c.packageExists(ctx, opts.Package) {
-		return "", fmt.Errorf("package %s does not exist - create it first to avoid orphan locks", opts.Package)
-	}
+	opts.Transport = transport
 
 	params := url.Values{}
 	if opts.Transport != "" {
@@ -203,6 +184,37 @@ func (c *Client) CreateSourceCodePlugin(ctx context.Context, opts SourceCodePlug
 		return "", fmt.Errorf("creating %s: %w", opts.Name, err)
 	}
 	return objectURL, nil
+}
+
+// enhancementCreateGates runs the checks every ENHO creation shares with
+// CreateObject: the mutation policy, the transport choice for a transportable
+// package, and the package check that keeps a missing package from leaving an
+// orphan enqueue behind. It returns the transport to create with.
+func (c *Client) enhancementCreateGates(ctx context.Context, opName, pkg, transport, objectURL string) (string, error) {
+	if err := c.checkMutation(ctx, MutationContext{
+		Op:        OpCreate,
+		OpName:    opName,
+		Package:   pkg,
+		Transport: transport,
+	}); err != nil {
+		return "", err
+	}
+	if transport == "" && !strings.HasPrefix(pkg, "$") && c.config.Safety.TransportChoice != "off" {
+		choice := c.planTransport(ctx, "", objectURL, pkg)
+		if choice.Err != nil {
+			return "", choice.Err
+		}
+		if choice.Transport != "" {
+			if err := c.checkTransportableEdit(choice.Transport, opName); err != nil {
+				return "", err
+			}
+			transport = choice.Transport
+		}
+	}
+	if !c.packageExists(ctx, pkg) {
+		return "", fmt.Errorf("package %s does not exist - create it first to avoid orphan locks", pkg)
+	}
+	return transport, nil
 }
 
 // sourceCodePluginBody is the enhancement document ADT takes to create a
