@@ -549,3 +549,25 @@ rows), `wait` (seconds, default 60, at most 300), `job_name`, and `spool`/`joblo
 (both default true). Destination overrides
 in `params`: `host`, `sysnr`, `port`, `user` — otherwise the host and system number
 come from the configured ADT URL and the gateway is `3300 + sysnr`.
+
+### Classic BAdI implementations (SXCI)
+
+Classic BAdI implementations (SE19) have no ADT endpoint, and the standard save
+(`SXO_IMPL_SAVE`) needs a GUI ALV grid for the filter values. vsp replays the steps
+behind it in a temporary report in `$TMP`, runs that as a background job over RFC,
+reads the outcome from the job log and deletes the report again — so it needs the
+RFC connection, like `run`.
+
+```
+SAP(action="create", target="SXCI", params={"name":"ZIMP_DEMO","badi":"BADI_X","description":"Demo",
+    "package":"ZPKG","transport":"A4HK900001","filters":["1000"]})
+SAP(action="delete", target="SXCI ZIMP_DEMO", params={"transport":"A4HK900001"})
+```
+
+`create` takes `class` (default: the name SE19 proposes; the class is generated),
+`language` (`D` or `DE`, default the logon language), `filters` (required for a
+filter-dependent BAdI, refused otherwise) and `activate` (default true). Menu and
+screen enhancements of a BAdI are not implemented; the result warns when the BAdI
+has them. `delete` also deletes the implementing class unless another
+implementation uses it or `keep_class` is true. For a classic BAdI that SAP
+migrated to an enhancement spot, an ENHO BAdI implementation is the better choice.

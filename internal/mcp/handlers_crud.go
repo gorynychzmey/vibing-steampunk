@@ -13,8 +13,8 @@ import (
 )
 
 // routeCRUDAction routes "edit" for LOCK/UNLOCK/UPDATE_SOURCE/
-// RECOVER_FAILED_CREATE, "create" for OBJECT/DEVC/TABL/CLONE, "delete"
-// for OBJECT.
+// RECOVER_FAILED_CREATE, "create" for OBJECT/DEVC/TABL/CLONE/SXCI, "delete"
+// for OBJECT/SXCI.
 func (s *Server) routeCRUDAction(ctx context.Context, action, objectType, objectName string, params map[string]any) (*mcp.CallToolResult, bool, error) {
 	if action == "edit" {
 		switch objectType {
@@ -43,11 +43,15 @@ func (s *Server) routeCRUDAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleCreateTable, params)
 		case "CLONE":
 			return s.callHandler(ctx, s.handleCloneObject, params)
+		case "SXCI":
+			return s.callHandler(ctx, s.handleCreateClassicBadi, withName(params, objectName))
 		}
 	}
 
 	if action == "delete" {
 		switch objectType {
+		case "SXCI":
+			return s.callHandler(ctx, s.handleDeleteClassicBadi, withName(params, objectName))
 		case "OBJECT", "":
 			if getStringParam(params, "object_url") != "" {
 				return s.callHandler(ctx, s.handleDeleteObject, params)
@@ -605,4 +609,18 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 			result.Object, result.ObjName, result.NewPackage, result.Message)), nil
 	}
 	return newToolResultError(fmt.Sprintf("Move failed: %s", result.Message)), nil
+}
+
+// withName fills params["name"] from the target ("SXCI ZIMP") when the call
+// did not pass it.
+func withName(params map[string]any, objectName string) map[string]any {
+	if objectName == "" || getStringParam(params, "name") != "" {
+		return params
+	}
+	out := make(map[string]any, len(params)+1)
+	for k, v := range params {
+		out[k] = v
+	}
+	out["name"] = objectName
+	return out
 }

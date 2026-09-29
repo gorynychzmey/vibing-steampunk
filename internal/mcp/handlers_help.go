@@ -88,6 +88,13 @@ Create object:
   SAP(action="create", target="TABL", params={"name": "ZTABLE", "description": "New table", "fields": "[...]", "package": "$TMP"})
   SAP(action="create", target="CLONE", params={"object_type": "CLAS", "source_name": "ZCL_OLD", "target_name": "ZCL_NEW", "package": "$TMP"})
 
+Classic BAdI implementation (SE19, SXCI) -- runs as a background job over RFC, so it needs the
+RFC connection; the implementing class is proposed from the name and generated like SE19 does:
+  SAP(action="create", target="SXCI", params={"name": "ZIMP_DEMO", "badi": "BADI_X", "description": "Demo",
+      "package": "ZPKG", "transport": "A4HK900001", "filters": ["1000"]})
+  "class" names the implementing class, "language" the original language (D or DE), "activate": false leaves it inactive.
+  For a classic BAdI migrated to an enhancement spot, create an ENHO BAdI implementation instead.
+
 Class test include:
   SAP(action="create", target="CLAS_TEST_INCLUDE", params={"class_name": "ZCL_TEST", "lock_handle": "..."})
 
@@ -98,7 +105,8 @@ High-level create (with source):
 	case "delete":
 		return mcp.NewToolResultText(`SAP(action="delete") - Delete objects
 
-  SAP(action="delete", target="OBJECT", params={"object_url": "/sap/bc/adt/oo/classes/zcl_test", "lock_handle": "..."})`)
+  SAP(action="delete", target="OBJECT", params={"object_url": "/sap/bc/adt/oo/classes/zcl_test", "lock_handle": "..."})
+  SAP(action="delete", target="SXCI ZIMP_DEMO", params={"transport": "A4HK900001"})   classic BAdI implementation with its class ("keep_class": true keeps it)`)
 
 	case "search":
 		return mcp.NewToolResultText(`SAP(action="search") - Search for objects
