@@ -309,6 +309,52 @@ FORM say USING iv_key TYPE csequence iv_value TYPE csequence.
   MESSAGE lv_text TYPE 'S'.
 ENDFORM.
 
+* In a background job SXI_CLASS_ENQUEUE treats the implementing class as a
+* generated object (TADIR-GENFLAG = X), and generated objects are never
+* recorded in a request. SE19 in dialog records the class; so does this.
+FORM record_class USING iv_class TYPE seoclsname
+                        iv_pkg TYPE devclass
+                        iv_langu TYPE sy-langu
+                  CHANGING cv_korr TYPE trkorr.
+  DATA: lv_gen TYPE tadir-genflag,
+        lv_obj TYPE tadir-obj_name,
+        lv_pkg TYPE devclass.
+  lv_obj = iv_class.
+  SELECT SINGLE genflag FROM tadir INTO lv_gen
+    WHERE pgmid = 'R3TR' AND object = 'CLAS' AND obj_name = lv_obj.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+  IF lv_gen IS NOT INITIAL.
+    CALL FUNCTION 'TR_TADIR_INTERFACE'
+      EXPORTING wi_remove_genflag = 'X'
+                wi_test_modus = ' '
+                wi_tadir_pgmid = 'R3TR'
+                wi_tadir_object = 'CLAS'
+                wi_tadir_obj_name = lv_obj
+      EXCEPTIONS OTHERS = 1.
+    IF sy-subrc <> 0.
+      PERFORM fail USING 'TR_TADIR_INTERFACE (generation flag of the class)'.
+    ENDIF.
+  ENDIF.
+  CHECK iv_pkg(1) <> '$'.
+  lv_pkg = iv_pkg.
+  CALL FUNCTION 'RS_CORR_INSERT'
+    EXPORTING object = iv_class
+              object_class = 'CLAS'
+              mode = seex_access_modify
+              global_lock = seex_true
+              master_language = iv_langu
+              devclass = lv_pkg
+              korrnum = cv_korr
+              suppress_dialog = seex_true
+    IMPORTING korrnum = cv_korr
+    EXCEPTIONS OTHERS = 1.
+  IF sy-subrc <> 0.
+    PERFORM fail USING 'RS_CORR_INSERT (class)'.
+  ENDIF.
+ENDFORM.
+
 FORM fail USING iv_step TYPE csequence.
   DATA: lv_msg  TYPE string,
         lv_code TYPE string.
@@ -584,9 +630,13 @@ START-OF-SELECTION.
   PERFORM say USING 'KORR' gv_korr.
 
   IF gc_activate = seex_true.
+* With no_dialog SXO_IMPL_ACTIVE raises nothing: whatever stops the
+* activation is only written to the protocol.
+    CLEAR gt_prot.
     CALL FUNCTION 'SXO_IMPL_ACTIVE'
       EXPORTING imp_name = gc_imp
                 no_dialog = seex_true
+      CHANGING protocol = gt_prot
       EXCEPTIONS OTHERS = 1.
     IF sy-subrc <> 0.
       MESSAGE ID sy-msgid TYPE 'S' NUMBER sy-msgno
@@ -596,7 +646,17 @@ START-OF-SELECTION.
     ELSE.
       COMMIT WORK AND WAIT.
     ENDIF.
+    LOOP AT gt_prot INTO gs_prot WHERE severity = 'E' OR severity = 'A' OR severity = 'W'.
+      MESSAGE ID gs_prot-ag TYPE 'S' NUMBER gs_prot-msgnr
+              WITH gs_prot-var1 gs_prot-var2 gs_prot-var3 gs_prot-var4 INTO gv_text_err.
+      gv_text_err = |Activation { gs_prot-severity }: { gv_text_err } ({ gs_prot-ag } { gs_prot-msgnr })|.
+      PERFORM say USING 'WARN' gv_text_err.
+    ENDLOOP.
   ENDIF.
+* Recorded only now: with the class already in the request, the activation
+* above refuses it (ENHANCEMENT 575, "does not implement the interface").
+  PERFORM record_class USING gv_class gv_pkg gc_langu CHANGING gv_korr.
+  COMMIT WORK AND WAIT.
   SELECT SINGLE active FROM sxc_attr INTO gs_attr-active WHERE imp_name = gc_imp.
   PERFORM say USING 'ACTIVE' gs_attr-active.
   PERFORM say USING 'OK' ''.
@@ -624,6 +684,7 @@ func classicBadiDeleteSource(prog, name, pkg, transport string, keepClass bool) 
       gs_class TYPE sxc_class,
       gv_mast TYPE sy-langu,
       gv_obj TYPE tadir-obj_name,
+      gv_class TYPE seoclsname,
       gv_text_err TYPE string.
 
 START-OF-SELECTION.
@@ -677,6 +738,8 @@ START-OF-SELECTION.
 
   SELECT SINGLE * FROM sxc_class INTO gs_class WHERE imp_name = gc_imp.
   IF sy-subrc = 0 AND gc_keep_class = seex_false.
+    gv_class = gs_class-imp_class.
+    PERFORM record_class USING gv_class gv_pkg gv_mast CHANGING gv_korr.
     CALL FUNCTION 'SXV_IMP_CLASS_DELETE'
       EXPORTING imp_name = gc_imp
                 inter_name = gs_class-inter_name
@@ -731,14 +794,27 @@ START-OF-SELECTION.
     go_log->delete( ).
   ENDIF.
 
+* A local object loses its TADIR entry. A transportable one is locked in the
+* request and keeps it with the deletion flag until the request is released,
+* as the Class Builder leaves a deleted class.
   gv_obj = gc_imp.
-  CALL FUNCTION 'TR_TADIR_INTERFACE'
-    EXPORTING wi_delete_tadir_entry = 'X'
-              wi_test_modus = ' '
-              wi_tadir_pgmid = 'R3TR'
-              wi_tadir_object = seex_imp_ob_class
-              wi_tadir_obj_name = gv_obj
-    EXCEPTIONS OTHERS = 1.
+  IF gv_pkg(1) = '$'.
+    CALL FUNCTION 'TR_TADIR_INTERFACE'
+      EXPORTING wi_delete_tadir_entry = 'X'
+                wi_test_modus = ' '
+                wi_tadir_pgmid = 'R3TR'
+                wi_tadir_object = seex_imp_ob_class
+                wi_tadir_obj_name = gv_obj
+      EXCEPTIONS OTHERS = 1.
+  ELSE.
+    CALL FUNCTION 'TR_TADIR_INTERFACE'
+      EXPORTING iv_delflag = 'X'
+                wi_test_modus = ' '
+                wi_tadir_pgmid = 'R3TR'
+                wi_tadir_object = seex_imp_ob_class
+                wi_tadir_obj_name = gv_obj
+      EXCEPTIONS OTHERS = 1.
+  ENDIF.
   IF sy-subrc <> 0.
     PERFORM fail USING 'TR_TADIR_INTERFACE'.
   ENDIF.

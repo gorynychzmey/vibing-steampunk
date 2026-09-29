@@ -21,6 +21,8 @@ func TestClassicBadiCreateSource(t *testing.T) {
 		"gv_korr = 'A4HK900001'.",
 		"CALL FUNCTION 'SXO_IMPL_ACTIVE'",
 		"FORM fail_text",
+		"PERFORM record_class USING gv_class gv_pkg gc_langu CHANGING gv_korr.",
+		"wi_remove_genflag = 'X'",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("create source lacks %q", want)
@@ -39,7 +41,9 @@ func TestClassicBadiDeleteSource(t *testing.T) {
 		"gc_keep_class TYPE seex_boolean VALUE 'X'",
 		"gv_pkg = '$TMP'.",
 		"wi_delete_tadir_entry = 'X'",
+		"iv_delflag = 'X'",
 		"gv_obj TYPE tadir-obj_name",
+		"PERFORM record_class USING gv_class gv_pkg gv_mast CHANGING gv_korr.",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("delete source lacks %q", want)
