@@ -3,9 +3,7 @@ package adt
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
-	"time"
 )
 
 // Classic BAdI implementations (SXCI) are the one kind of enhancement that
@@ -21,16 +19,6 @@ import (
 // A classic BAdI that SAP migrated to an enhancement spot (SXS_ATTR has a
 // MIG_ENHSPOTNAME) is better implemented as a new-style BAdI implementation
 // (ENHO); SXCI stays the only way for the ones that were never migrated.
-
-// ClassicBadiRunner is what the SXCI operations need beyond ADT: running a
-// report as a background job, returning the texts of its job log, and reading
-// TADIR. The MCP layer implements it over RFC (XBP, RFC_READ_TABLE).
-type ClassicBadiRunner interface {
-	RunReport(ctx context.Context, program string) ([]string, error)
-	// ObjectPackage returns the package of R3TR <object> <name>, and false if
-	// there is no such TADIR entry.
-	ObjectPackage(ctx context.Context, object, name string) (string, bool, error)
-}
 
 // ClassicBadiImplementation describes one classic BAdI implementation.
 type ClassicBadiImplementation struct {
@@ -81,21 +69,22 @@ func (c *Client) CreateClassicBadiImplementation(ctx context.Context, o ClassicB
 	}); err != nil {
 		return nil, err
 	}
-	if _, exists, err := run.ObjectPackage(ctx, "SXCI", o.Name); err != nil {
+	if _, exists, err := objectPackage(ctx, run, "SXCI", o.Name); err != nil {
 		return nil, err
 	} else if exists {
 		return nil, fmt.Errorf("classic BAdI implementation %s already exists", o.Name)
 	}
 
 	res := &ClassicBadiResult{Name: o.Name, Badi: o.Badi, Package: o.Package, Transport: o.Transport}
-	lines, program, err := c.runTempReport(ctx, "ZTEMP_SXCI_", func(prog string) string {
+	tr, err := c.runTempReport(ctx, "ZTEMP_SXCI_", func(prog string) string {
 		return classicBadiCreateSource(prog, o)
 	}, run)
-	res.Program = program
+	res.Program = tr.Program
+	res.Warnings = append(res.Warnings, tr.Warnings...)
 	if err != nil {
 		return res, err
 	}
-	return res, applyClassicBadiLog(res, lines)
+	return res, applyClassicBadiLog(res, tr.Lines)
 }
 
 // DeleteClassicBadiImplementation deletes a classic BAdI implementation and,
@@ -107,7 +96,7 @@ func (c *Client) DeleteClassicBadiImplementation(ctx context.Context, name, tran
 	if err := validateABAPName("implementation name", name, 20); err != nil {
 		return nil, err
 	}
-	pkg, exists, err := run.ObjectPackage(ctx, "SXCI", name)
+	pkg, exists, err := objectPackage(ctx, run, "SXCI", name)
 	if err != nil {
 		return nil, err
 	}
@@ -125,59 +114,15 @@ func (c *Client) DeleteClassicBadiImplementation(ctx context.Context, name, tran
 	}
 
 	res := &ClassicBadiResult{Name: name, Package: pkg, Transport: transport}
-	lines, program, err := c.runTempReport(ctx, "ZTEMP_SXCD_", func(prog string) string {
+	tr, err := c.runTempReport(ctx, "ZTEMP_SXCD_", func(prog string) string {
 		return classicBadiDeleteSource(prog, name, pkg, transport, keepClass)
 	}, run)
-	res.Program = program
+	res.Program = tr.Program
+	res.Warnings = append(res.Warnings, tr.Warnings...)
 	if err != nil {
 		return res, err
 	}
-	return res, applyClassicBadiLog(res, lines)
-}
-
-// runTempReport writes a report into $TMP, activates it, runs it as a
-// background job and deletes it again, returning the job log texts.
-func (c *Client) runTempReport(ctx context.Context, prefix string, source func(prog string) string, run ClassicBadiRunner) ([]string, string, error) {
-	stamp := fmt.Sprintf("%d", time.Now().UnixNano()/int64(time.Millisecond))
-	prog := prefix + stamp[len(stamp)-8:]
-	objectURL := "/sap/bc/adt/programs/programs/" + url.PathEscape(strings.ToLower(prog))
-
-	if err := c.CreateObject(ctx, CreateObjectOptions{
-		ObjectType: ObjectTypeProgram, Name: prog,
-		Description: "vsp temporary report", PackageName: "$TMP",
-	}); err != nil {
-		return nil, prog, fmt.Errorf("creating the temporary report %s: %w", prog, err)
-	}
-	ctx = withMutationPackageChecked(ctx, objectURL)
-	defer func() {
-		if lock, err := c.LockObject(ctx, objectURL, "MODIFY"); err == nil {
-			_ = c.DeleteObject(ctx, objectURL, lock.LockHandle, "")
-		}
-	}()
-
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
-	if err != nil {
-		return nil, prog, fmt.Errorf("locking the temporary report %s: %w", prog, err)
-	}
-	if err := c.UpdateSource(ctx, objectURL+"/source/main", source(prog), lock.LockHandle, ""); err != nil {
-		_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-		return nil, prog, fmt.Errorf("writing the temporary report %s: %w", prog, err)
-	}
-	if err := c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
-		return nil, prog, fmt.Errorf("unlocking the temporary report %s: %w", prog, err)
-	}
-	activation, err := c.Activate(ctx, objectURL, prog)
-	if err != nil {
-		return nil, prog, fmt.Errorf("activating the temporary report %s: %w", prog, err)
-	}
-	if failure := compileFailure(activation, prog, 0); failure != nil {
-		return nil, prog, fmt.Errorf("the generated report %s does not compile on this system: %s", prog, failure.Title)
-	}
-	lines, err := run.RunReport(ctx, prog)
-	if err != nil {
-		return nil, prog, err
-	}
-	return lines, prog, nil
+	return res, applyClassicBadiLog(res, tr.Lines)
 }
 
 // applyClassicBadiLog reads the markers the generated report wrote into its

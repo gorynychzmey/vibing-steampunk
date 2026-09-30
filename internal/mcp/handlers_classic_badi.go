@@ -30,8 +30,8 @@ func (r rfcClassicBadiRunner) RunReport(ctx context.Context, program string) ([]
 		return nil, err
 	}
 	if run.Status != "F" && run.Status != "A" {
-		return nil, fmt.Errorf("job %s / %s has not ended after %s (status %s); the temporary report is deleted, so check SM37 before retrying",
-			run.JobName, run.JobCount, classicBadiWait, run.StatusFor)
+		return nil, fmt.Errorf("job %s / %s has not ended after %s (status %s), so check SM37 before retrying: %w",
+			run.JobName, run.JobCount, classicBadiWait, run.StatusFor, adt.ErrJobNotEnded)
 	}
 	log, err := saprfc.ReadJobLog(ctx, r.c, run.JobName, run.JobCount)
 	if err != nil {
@@ -44,16 +44,8 @@ func (r rfcClassicBadiRunner) RunReport(ctx context.Context, program string) ([]
 	return lines, nil
 }
 
-func (r rfcClassicBadiRunner) ObjectPackage(ctx context.Context, object, name string) (string, bool, error) {
-	where := fmt.Sprintf("PGMID = 'R3TR' AND OBJECT = '%s' AND OBJ_NAME = '%s'", object, strings.ReplaceAll(name, "'", "''"))
-	rows, err := saprfc.ReadTable(ctx, r.c, "TADIR", where, []string{"DEVCLASS"}, 1)
-	if err != nil {
-		return "", false, fmt.Errorf("reading TADIR: %w", err)
-	}
-	if len(rows) == 0 {
-		return "", false, nil
-	}
-	return strings.TrimSpace(rows[0]["DEVCLASS"]), true, nil
+func (r rfcClassicBadiRunner) ReadTable(ctx context.Context, table, where string, fields []string, max int) ([]map[string]string, error) {
+	return saprfc.ReadTable(ctx, r.c, table, where, fields, max)
 }
 
 // withClassicBadiRunner hands fn a runner on this server's RFC connection.
@@ -68,10 +60,14 @@ func (s *Server) withClassicBadiRunner(ctx context.Context, args map[string]any,
 		if errors.Is(err, openrfc.ErrTransport) || errors.Is(err, openrfc.ErrClosed) {
 			s.dropSharedRFC(ctx)
 		}
+		msg := err.Error()
 		if res != nil && res.Program != "" {
-			return newToolResultError(fmt.Sprintf("%v (temporary report %s)", err, res.Program)), nil
+			msg = fmt.Sprintf("%s (temporary report %s)", msg, res.Program)
 		}
-		return newToolResultError(err.Error()), nil
+		if res != nil && len(res.Warnings) > 0 {
+			msg += "\nWarnings:\n- " + strings.Join(res.Warnings, "\n- ")
+		}
+		return newToolResultError(msg), nil
 	}
 	out, _ := json.MarshalIndent(res, "", "  ")
 	return mcp.NewToolResultText(string(out)), nil
