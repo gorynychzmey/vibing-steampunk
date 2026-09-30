@@ -49,14 +49,64 @@ func StructureURL(name string) string {
 // structureSourceName reads the name the DDL declares, and the base type of
 // an append. The name in the source has to be the object's name: SAP refuses
 // a mismatch only at activation, after the object exists.
+//
+// Comments and string literals are blanked out first, so a declaration quoted
+// in an annotation or commented out does not count; the first declaration left
+// is the one.
 func structureSourceName(source string) (name, extends string, err error) {
-	if m := reExtendType.FindStringSubmatch(source); m != nil {
-		return strings.ToUpper(m[2]), strings.ToUpper(m[1]), nil
-	}
-	if m := reDefineStructure.FindStringSubmatch(source); m != nil {
-		return strings.ToUpper(m[1]), "", nil
+	code := ddlCode(source)
+	ext := reExtendType.FindStringSubmatchIndex(code)
+	def := reDefineStructure.FindStringSubmatchIndex(code)
+	switch {
+	case ext != nil && (def == nil || ext[0] < def[0]):
+		return strings.ToUpper(code[ext[4]:ext[5]]), strings.ToUpper(code[ext[2]:ext[3]]), nil
+	case def != nil:
+		return strings.ToUpper(code[def[2]:def[3]]), "", nil
 	}
 	return "", "", fmt.Errorf(`the source must be "define structure <name> { ... }" or "extend type <base> with <append> { ... }"`)
+}
+
+// ddlCode replaces the comments (//, --, /* */) and single-quoted string
+// literals of DDL source with spaces, keeping every other byte in place.
+func ddlCode(source string) string {
+	b := []byte(source)
+	for i := 0; i < len(b); {
+		j := i + 1
+		switch {
+		case b[i] == '\'':
+			for j < len(b) && b[j] != '\'' && b[j] != '\n' {
+				j++
+			}
+			if j < len(b) && b[j] == '\'' {
+				j++
+			}
+		case i+1 < len(b) && (b[i] == '/' && b[i+1] == '/' || b[i] == '-' && b[i+1] == '-'):
+			for j < len(b) && b[j] != '\n' {
+				j++
+			}
+		case i+1 < len(b) && b[i] == '/' && b[i+1] == '*':
+			j = i + 2
+			for j+1 < len(b) && (b[j] != '*' || b[j+1] != '/') {
+				j++
+			}
+			j = min(j+2, len(b))
+		default:
+			i++
+			continue
+		}
+		blank(b, i, j)
+		i = j
+	}
+	return string(b)
+}
+
+// blank overwrites b[from:to] with spaces, line breaks excepted.
+func blank(b []byte, from, to int) {
+	for k := from; k < to; k++ {
+		if b[k] != '\n' {
+			b[k] = ' '
+		}
+	}
 }
 
 // CreateStructure creates a structure or an append structure, writes its DDL
@@ -150,8 +200,13 @@ func (c *Client) CreateStructure(ctx context.Context, opts StructureOptions) (*S
 	if !activation.Success {
 		return res, fmt.Errorf("structure %s was created but did not activate: %s", opts.Name, strings.Join(activation.ProblemLines(), "; "))
 	}
-	// Trust the inactive list, not the answer to the activation.
-	if records, lerr := c.GetInactiveObjects(ctx); lerr == nil && objectInactive(objectURL, records) {
+	// Trust the inactive list, not the answer to the activation. Without the
+	// list there is nothing to confirm the activation with.
+	records, err := c.GetInactiveObjects(ctx)
+	if err != nil {
+		return res, fmt.Errorf("structure %s: SAP reported the activation as successful, but the inactive list could not be read to confirm it: %w", opts.Name, err)
+	}
+	if objectInactive(objectURL, records) {
 		return res, fmt.Errorf("structure %s: SAP reported the activation as successful, but the structure is still inactive", opts.Name)
 	}
 	res.Active = true
