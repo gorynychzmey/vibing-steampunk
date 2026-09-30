@@ -7,6 +7,9 @@ func TestStructureSourceName(t *testing.T) {
 		"@EndUserText.label : 'x'\ndefine structure zdemo {\n  a : abap.char(1);\n}":                             {"ZDEMO", ""},
 		"define   structure /par/s_demo { a : abap.char(1); }":                                                   {"/PAR/S_DEMO", ""},
 		"@AbapCatalog.enhancement.category : #NOT_EXTENSIBLE\nextend type shp_vl10_item with /par/append_x {\n}": {"/PAR/APPEND_X", "SHP_VL10_ITEM"},
+		"// extend type fake with wrong\ndefine structure zdemo { a : abap.char(1); }":                           {"ZDEMO", ""},
+		"/* define structure zold */ @EndUserText.label : 'extend type x with y'\ndefine structure znew { }":     {"ZNEW", ""},
+		"-- define structure zold\nextend type zbase with zappend { }":                                           {"ZAPPEND", "ZBASE"},
 	} {
 		name, extends, err := structureSourceName(src)
 		if err != nil || name != want[0] || extends != want[1] {
