@@ -81,6 +81,9 @@ func (s *Server) handleUniversalTool(ctx context.Context, request mcp.CallToolRe
 	type routeFunc func(ctx context.Context, action, objectType, objectName string, params map[string]any) (*mcp.CallToolResult, bool, error)
 
 	routes := []routeFunc{
+		// Ahead of the source and read routers, which would take "SEGM" for
+		// an object type they do not know.
+		s.routeIDocSegmentAction,
 		s.routeSourceAction,
 		s.routeReadAction,
 		s.routeSearchAction,

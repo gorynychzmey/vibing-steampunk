@@ -20,6 +20,7 @@ func handleHelp(topic string) *mcp.CallToolResult {
 Read source with context (recommended):
   SAP(action="read", target="CLAS ZCL_TEST")
   SAP(action="read", target="PROG ZREPORT")
+  SAP(action="read", target="SEGM Z1DEMO")      IDoc segment type: fields, versions, release state (over RFC)
   SAP(action="read", target="INTF ZIF_TEST")
   SAP(action="read", target="FUNC ZGET_DATA", params={"parent": "ZFUNC_GROUP"})
   SAP(action="read", target="DDLS ZDDL_VIEW")
@@ -58,6 +59,12 @@ High-level edit (recommended - auto lock/unlock/activate):
       the function group is resolved from the module name; pass params={"parent": "ZMY_FG"} to name it
   SAP(action="edit", target="DDLS ZDDL_VIEW", params={"source": "@AbapCatalog..."})
 
+IDoc segment type (WE31), as a background job over RFC. "fields" is the complete new list; fields of a
+released version must stay, in order -- new ones go at the end. Released in this SAP release, the version
+is reopened, changed and released again; released in an older one, a new version is added:
+  SAP(action="edit", target="SEGM Z1DEMO", params={"fields": ["MATNR MATNR", "FLAG CHAR1", "STAMP TIMESTAMP"], "transport": "A4HK900001"})
+  SAP(action="edit", target="SEGM Z1DEMO", params={"release": true, "transport": "A4HK900001"})   release; false reopens
+
 Method-level edit (CLAS only):
   SAP(action="edit", target="CLAS ZCL_TEST", params={"source": "METHOD get_data...ENDMETHOD.", "method": "GET_DATA"})
 
@@ -95,6 +102,12 @@ RFC connection; the implementing class is proposed from the name and generated l
   "class" names the implementing class, "language" the original language (D or DE), "activate": false leaves it inactive.
   For a classic BAdI migrated to an enhancement spot, create an ENHO BAdI implementation instead.
 
+IDoc segment type (WE31) -- runs as a background job over RFC; the segment and its DDIC structure
+are recorded in the request by SAP itself:
+  SAP(action="create", target="SEGM Z1DEMO", params={"description": "Demo segment", "package": "ZPKG",
+      "transport": "A4HK900001", "fields": [{"name": "MATNR", "data_element": "MATNR"}, "FLAG CHAR1"], "release": true})
+  "qualified": true makes it a qualified segment; "iso_code": true on a field converts it to its ISO code.
+
 Class test include:
   SAP(action="create", target="CLAS_TEST_INCLUDE", params={"class_name": "ZCL_TEST", "lock_handle": "..."})
 
@@ -106,7 +119,8 @@ High-level create (with source):
 		return mcp.NewToolResultText(`SAP(action="delete") - Delete objects
 
   SAP(action="delete", target="OBJECT", params={"object_url": "/sap/bc/adt/oo/classes/zcl_test", "lock_handle": "..."})
-  SAP(action="delete", target="SXCI ZIMP_DEMO", params={"transport": "A4HK900001"})   classic BAdI implementation with its class ("keep_class": true keeps it)`)
+  SAP(action="delete", target="SXCI ZIMP_DEMO", params={"transport": "A4HK900001"})   classic BAdI implementation with its class ("keep_class": true keeps it)
+  SAP(action="delete", target="SEGM Z1DEMO", params={"transport": "A4HK900001"})   IDoc segment type with all its versions`)
 
 	case "search":
 		return mcp.NewToolResultText(`SAP(action="search") - Search for objects
@@ -644,7 +658,7 @@ func getUnhandledErrorMessage(action, objectType, objectName string) string {
 		sb.WriteString("Supported read targets: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, TABL, TABL_CONTENTS, DEVC, MSAG, TRAN, TYPE_INFO, STRUCT, CDS_DEPS\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"read\") for examples.")
 	case "edit":
-		sb.WriteString("Supported edit targets: CLAS, PROG, INTF, FUNC, DDLS, BDEF, SRVD, TABL, LOCK, UNLOCK, UPDATE_SOURCE, ACTIVATE, ACTIVATE_PACKAGE, EDITSOURCE, PUBLISH_SERVICE, UNPUBLISH_SERVICE\n")
+		sb.WriteString("Supported edit targets: CLAS, PROG, INTF, FUNC, DDLS, BDEF, SRVD, TABL, SEGM, LOCK, UNLOCK, UPDATE_SOURCE, ACTIVATE, ACTIVATE_PACKAGE, EDITSOURCE, PUBLISH_SERVICE, UNPUBLISH_SERVICE\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"edit\") for examples.")
 	case "create":
 		sb.WriteString("Supported create targets: OBJECT, DEVC, TABL, CLONE, PROGRAM, CLASS_WITH_TESTS, CLAS_TEST_INCLUDE\n")
