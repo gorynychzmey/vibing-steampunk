@@ -86,7 +86,7 @@ func (c *Client) CreateStructure(ctx context.Context, opts StructureOptions) (*S
 		return nil, fmt.Errorf("a description is required")
 	}
 
-	if err := c.checkMutation(ctx, MutationContext{
+	if err = c.checkMutation(ctx, MutationContext{
 		Op:        OpCreate,
 		OpName:    "CreateStructure",
 		Package:   opts.Package,
@@ -112,7 +112,7 @@ func (c *Client) CreateStructure(ctx context.Context, opts StructureOptions) (*S
 	if opts.Transport != "" {
 		params.Set("corrNr", opts.Transport)
 	}
-	if _, err := c.transport.Request(ctx, "/sap/bc/adt/ddic/structures", &RequestOptions{
+	if _, err = c.transport.Request(ctx, "/sap/bc/adt/ddic/structures", &RequestOptions{
 		Method:      http.MethodPost,
 		Query:       params,
 		Body:        []byte(body),
@@ -132,13 +132,13 @@ func (c *Client) CreateStructure(ctx context.Context, opts StructureOptions) (*S
 	if err != nil {
 		return res, fmt.Errorf("structure %s created, but locking it failed: %w", opts.Name, err)
 	}
-	if err := c.UpdateSource(ctx, objectURL+"/source/main", opts.Source, lock.LockHandle, opts.Transport); err != nil {
+	if err = c.UpdateSource(ctx, objectURL+"/source/main", opts.Source, lock.LockHandle, opts.Transport); err != nil {
 		if uerr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); uerr != nil {
 			return res, fmt.Errorf("structure %s created, but writing its source failed: %w — %s", opts.Name, err, strandedLockAdvice(objectURL, uerr))
 		}
 		return res, fmt.Errorf("structure %s created, but writing its source failed: %w", opts.Name, err)
 	}
-	if err := c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
+	if err = c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
 		return res, fmt.Errorf("unlocking structure %s: %w — %s", opts.Name, err, strandedLockAdvice(objectURL, err))
 	}
 
