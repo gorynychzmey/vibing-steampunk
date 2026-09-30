@@ -115,7 +115,7 @@ func domainBody(o DomainOptions, lang string) string {
     <doma:valueInformation>%s<doma:appendExists>false</doma:appendExists><doma:fixValues>%s</doma:fixValues></doma:valueInformation>
   </doma:content>
 </doma:domain>`,
-		escapeXML(o.Name), escapeXML(o.Description), lang, lang, escapeXML(o.Package),
+		escapeXML(o.Name), escapeXML(o.Description), escapeXML(lang), escapeXML(lang), escapeXML(o.Package),
 		escapeXML(strings.ToUpper(o.DataType)), o.Length, o.Decimals,
 		o.OutputLength, escapeXML(strings.ToUpper(o.ConversionExit)), xmlTrueFalse(o.Signed), xmlTrueFalse(o.Lowercase),
 		valueTable, fv.String())
@@ -141,7 +141,7 @@ func dataElementBody(o DataElementOptions, lang string) string {
   <adtcore:packageRef adtcore:name="%s"/>
   <dtel:dataElement xmlns:dtel="http://www.sap.com/adt/dictionary/dataelements"><dtel:typeKind>%s</dtel:typeKind><dtel:typeName>%s</dtel:typeName><dtel:dataType>%s</dtel:dataType><dtel:dataTypeLength>%06d</dtel:dataTypeLength><dtel:dataTypeDecimals>%06d</dtel:dataTypeDecimals>%s<dtel:searchHelp>%s</dtel:searchHelp><dtel:searchHelpParameter/><dtel:setGetParameter>%s</dtel:setGetParameter><dtel:defaultComponentName/><dtel:deactivateInputHistory>false</dtel:deactivateInputHistory><dtel:changeDocument>%s</dtel:changeDocument><dtel:leftToRightDirection>false</dtel:leftToRightDirection><dtel:deactivateBIDIFiltering>false</dtel:deactivateBIDIFiltering></dtel:dataElement>
 </blue:wbobj>`,
-		escapeXML(o.Name), escapeXML(o.Description), lang, lang, escapeXML(o.Package),
+		escapeXML(o.Name), escapeXML(o.Description), escapeXML(lang), escapeXML(lang), escapeXML(o.Package),
 		typeKind, escapeXML(typeName), escapeXML(strings.ToUpper(o.DataType)), o.Length, o.Decimals,
 		labels.String(), escapeXML(strings.ToUpper(o.SearchHelp)), escapeXML(strings.ToUpper(o.ParameterID)), xmlTrueFalse(o.ChangeDocument))
 }
@@ -173,7 +173,7 @@ func (c *Client) CreateDomain(ctx context.Context, o DomainOptions) (*DDICObject
 	}
 	for _, v := range o.FixedValues {
 		if len([]rune(v.Text)) > 60 {
-			return nil, fmt.Errorf("fixed value %s: the text holds 60 characters", v.Low)
+			return nil, fmt.Errorf("fixed value %s: the text is %d characters long, at most 60 fit", v.Low, len([]rune(v.Text)))
 		}
 	}
 	o.Package = defaultPackage(o.Package)
@@ -252,7 +252,13 @@ func (c *Client) createDDICForm(ctx context.Context, what, name, pkg, transport,
 	if !activation.Success {
 		return res, fmt.Errorf("%s %s was created but did not activate: %s", what, name, strings.Join(activation.ProblemLines(), "; "))
 	}
-	if records, lerr := c.GetInactiveObjects(ctx); lerr == nil && objectInactive(objectURL, records) {
+	// Trust the inactive list, not the answer to the activation (see
+	// CreateStructure). Without the list there is nothing to confirm it with.
+	records, err := c.GetInactiveObjects(ctx)
+	if err != nil {
+		return res, fmt.Errorf("%s %s: SAP reported the activation as successful, but the inactive list could not be read to confirm it: %w", what, name, err)
+	}
+	if objectInactive(objectURL, records) {
 		return res, fmt.Errorf("%s %s: SAP reported the activation as successful, but it is still inactive", what, name)
 	}
 	res.Active = true

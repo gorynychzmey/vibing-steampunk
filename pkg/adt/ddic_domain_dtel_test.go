@@ -37,6 +37,10 @@ func TestDataElementBody(t *testing.T) {
 	if !strings.Contains(b, `<dtel:typeKind>predefinedAbapType</dtel:typeKind><dtel:typeName></dtel:typeName><dtel:dataType>CHAR</dtel:dataType><dtel:dataTypeLength>000015</dtel:dataTypeLength>`) {
 		t.Errorf("predefined type: %s", b)
 	}
+	b = dataElementBody(DataElementOptions{Name: "ZDEMO", Domain: "ZD"}, `E"&`)
+	if !strings.Contains(b, `adtcore:language="E&quot;&amp;" adtcore:masterLanguage="E&quot;&amp;"`) {
+		t.Errorf("language not escaped: %s", b)
+	}
 }
 
 func TestDDICCreateRefusesBeforeSending(t *testing.T) {
