@@ -43,6 +43,7 @@ type IDocStatus struct {
 	Segment string `json:"segment,omitempty"` // segment number the status refers to
 	User    string `json:"user,omitempty"`
 	Program string `json:"program,omitempty"`
+	counter string // EDIDS-COUNTR, the order within one second
 }
 
 // IDocSegment is one data record.
@@ -276,19 +277,27 @@ func statusRecords(rows []map[string]any, texts map[string]string) []IDocStatus 
 			Date:    str(r["LOGDAT"]),
 			Time:    str(r["LOGTIM"]),
 			Text:    fillStatusText(str(r["STATXT"]), str(r["STAPA1"]), str(r["STAPA2"]), str(r["STAPA3"]), str(r["STAPA4"])),
+			counter: str(r["COUNTR"]),
 			Segment: strings.TrimLeft(str(r["SEGNUM"]), "0"),
 			User:    str(r["UNAME"]),
 			Program: str(r["REPID"]),
 		}
 		if id := str(r["STAMID"]); id != "" {
 			s.Message = id + " " + str(r["STAMNO"])
-			if s.Text == "" {
-				s.Text = fillStatusText(texts[s.Message], str(r["STAPA1"]), str(r["STAPA2"]), str(r["STAPA3"]), str(r["STAPA4"]))
+			if t := texts[s.Message]; t != "" {
+				s.Text = fillStatusText(t, str(r["STAPA1"]), str(r["STAPA2"]), str(r["STAPA3"]), str(r["STAPA4"]))
 			}
 		}
 		out = append(out, s)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Date+out[i].Time > out[j].Date+out[j].Time })
+	// Records of one second are common; the counter orders them.
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i].Date+out[i].Time, out[j].Date+out[j].Time
+		if a != b {
+			return a > b
+		}
+		return fmt.Sprintf("%016s", out[i].counter) > fmt.Sprintf("%016s", out[j].counter)
+	})
 	return out
 }
 
@@ -336,15 +345,15 @@ func trimZeros(s string) string {
 	return t
 }
 
-// messageTexts reads the T100 texts of the status messages whose status text
-// is empty -- EDIDS keeps only the message then. English first, German next;
-// a message without either stays a class and number.
+// messageTexts reads the T100 texts of the status messages. EDIDS-STATXT
+// holds 70 characters and is empty for many messages; the message itself
+// is complete. English first, German next.
 func messageTexts(ctx context.Context, c *rfc.Client, rows []map[string]any) map[string]string {
 	out := map[string]string{}
 	for _, r := range rows {
 		id, no := str(r["STAMID"]), str(r["STAMNO"])
 		key := id + " " + no
-		if id == "" || str(r["STATXT"]) != "" || out[key] != "" {
+		if id == "" || out[key] != "" {
 			continue
 		}
 		where := fmt.Sprintf("ARBGB = '%s' AND MSGNR = '%s' AND ( SPRSL = 'E' OR SPRSL = 'D' )", strings.ReplaceAll(id, "'", "''"), no)

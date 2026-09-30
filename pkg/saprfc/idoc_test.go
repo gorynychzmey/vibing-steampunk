@@ -63,11 +63,18 @@ func TestBuildSegments_FilterRawAndLimit(t *testing.T) {
 
 func TestStatusRecords(t *testing.T) {
 	rows := []map[string]any{
-		{"STATUS": "50", "LOGDAT": "20260929", "LOGTIM": "182024"},
+		{"STATUS": "50", "LOGDAT": "20260929", "LOGTIM": "182024", "COUNTR": "1"},
+		{"STATUS": "64", "LOGDAT": "20260929", "LOGTIM": "182024", "COUNTR": "2", "STAMID": "B1", "STAMNO": "005", "STATXT": "cut off after seventy charac"},
 		{"STATUS": "51", "LOGDAT": "20260929", "LOGTIM": "182025", "STAMID": "VG", "STAMNO": "204", "STAPA1": "0000011639", "STAPA2": ""},
 		{"STATUS": "56", "LOGDAT": "20260929", "LOGTIM": "182026", "STATXT": "Partner & not found", "STAPA1": "PI_Q"},
 	}
-	got := statusRecords(rows, map[string]string{"VG 204": "Customer & vendor & unknown"})
+	got := statusRecords(rows, map[string]string{"VG 204": "Customer & vendor & unknown", "B1 005": "the complete text"})
+	if got[2].Status != "64" || got[3].Status != "50" {
+		t.Errorf("records of one second in counter order: %s, %s", got[2].Status, got[3].Status)
+	}
+	if got[2].Text != "the complete text" {
+		t.Errorf("T100 text over the truncated STATXT: %q", got[2].Text)
+	}
 	if got[0].Status != "56" || got[0].Text != "Partner PI_Q not found" {
 		t.Errorf("newest first, text filled: %+v", got[0])
 	}
