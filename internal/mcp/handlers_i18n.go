@@ -96,10 +96,9 @@ func (s *Server) handleWriteMessageClassTexts(ctx context.Context, request mcp.C
 		return newToolResultError("language is required"), nil
 	}
 
-	lockHandle, ok := request.GetArguments()["lock_handle"].(string)
-	if !ok || lockHandle == "" {
-		return newToolResultError("lock_handle is required"), nil
-	}
+	// Optional. Left empty, the write takes and releases its own lock, so the
+	// handle never has to survive a model turn (#169).
+	lockHandle, _ := request.GetArguments()["lock_handle"].(string)
 
 	transport, _ := request.GetArguments()["transport"].(string)
 

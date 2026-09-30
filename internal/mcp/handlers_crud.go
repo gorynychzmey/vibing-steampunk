@@ -235,6 +235,10 @@ func (s *Server) handleCreateObject(ctx context.Context, request mcp.CallToolReq
 		return mcp.NewToolResultText(string(output)), nil
 	}
 
+	if opts.ObjectType == adt.ObjectTypeMessageClass {
+		return s.createMessageClass(ctx, opts, request.GetArguments())
+	}
+
 	err := s.adtClient.CreateObject(ctx, opts)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to create object: %v", err)), nil
