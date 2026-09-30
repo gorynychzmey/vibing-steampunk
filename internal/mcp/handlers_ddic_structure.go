@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
 
