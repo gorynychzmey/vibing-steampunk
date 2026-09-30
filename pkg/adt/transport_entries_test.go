@@ -239,3 +239,34 @@ func TestRemoveTransportObject_SortsAndCompressesADuplicate(t *testing.T) {
 		t.Errorf("calls %v, want %v", bridge.fms, want)
 	}
 }
+
+// Deleting a DDIC object records it again as a deletion, and Sort and
+// Compress keeps both rows. Removal then hands the function a list with the
+// entry once, and gives the task's lock back by appending the object and
+// taking it out again.
+func TestRemoveTransportObject_RemovesAnEntryRecordedAsItsDeletion(t *testing.T) {
+	twice := RFCResult{Subrc: 99, Message: "Object entry exists more than once; sort and compress first"}
+	bridge := &sequenceOrganizer{results: []RFCResult{twice, {}, twice, {}, {}, {}}}
+	res, err := removeTransportObject(context.Background(), bridge, entriesRequest(), TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
+	if err != nil || !res.Removed {
+		t.Fatalf("removeTransportObject: %+v %v", res, err)
+	}
+	want := []string{
+		"TRINT_DELETE_COMM_OBJECT_KEYS", "TR_SORT_AND_COMPRESS_COMM", "TRINT_DELETE_COMM_OBJECT_KEYS",
+		"TRINT_DELETE_COMM_OBJECT_KEYS", "TR_APPEND_TO_COMM_OBJS_KEYS", "TRINT_DELETE_COMM_OBJECT_KEYS",
+	}
+	if !reflect.DeepEqual(bridge.fms, want) {
+		t.Errorf("calls %v, want %v", bridge.fms, want)
+	}
+}
+
+// When appending the object again fails, both rows are gone but the lock may
+// not be, and the caller is told so.
+func TestRemoveTransportObject_SaysWhenTheLockMayRemain(t *testing.T) {
+	twice := RFCResult{Subrc: 99, Message: "Object entry exists more than once; sort and compress first"}
+	bridge := &sequenceOrganizer{results: []RFCResult{twice, {}, twice, {}, {Subrc: 99, Message: "Object is locked"}}}
+	_, err := removeTransportObject(context.Background(), bridge, entriesRequest(), TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
+	if err == nil || !strings.Contains(err.Error(), "may still hold its lock") {
+		t.Fatalf("err = %v, want the lock named", err)
+	}
+}

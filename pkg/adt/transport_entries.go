@@ -255,14 +255,21 @@ func removeTransportObject(ctx context.Context, bridge organizerBridge, details 
 	if err != nil {
 		return out, fmt.Errorf("TRINT_DELETE_COMM_OBJECT_KEYS: %w", err)
 	}
-	// An entry recorded twice (deleting a structure records it again) is
-	// refused with "Object entry exists more than once; sort and compress
-	// first". That is what SE09's Sort and Compress is for; do it and retry.
-	if res.Subrc != 0 && strings.Contains(strings.ToLower(res.Message), "more than once") {
+	// An entry recorded twice is refused with "Object entry exists more than
+	// once; sort and compress first". That is what SE09's Sort and Compress
+	// is for; do it and retry.
+	if recordedTwice(res) {
 		if _, cerr := bridge.CallRFC(ctx, "TR_SORT_AND_COMPRESS_COMM", map[string]any{"IV_TRKORR": out.Task}); cerr == nil {
 			if res, err = del(); err != nil {
 				return out, fmt.Errorf("TRINT_DELETE_COMM_OBJECT_KEYS after sort and compress: %w", err)
 			}
+		}
+	}
+	// Deleting a DDIC object records it a second time, as a deletion
+	// (OBJFUNC D), and Sort and Compress keeps both rows.
+	if recordedTwice(res) {
+		if res, err = removeRecordedTwice(ctx, bridge, out.Task, key, del); err != nil {
+			return out, err
 		}
 	}
 	out.Message = res.Message
@@ -271,6 +278,56 @@ func removeTransportObject(ctx context.Context, bridge organizerBridge, details 
 	}
 	out.Removed = true
 	return out, nil
+}
+
+func recordedTwice(res *RFCResult) bool {
+	return res.Subrc != 0 && strings.Contains(strings.ToLower(res.Message), "more than once")
+}
+
+// removeRecordedTwice takes out an entry whose task holds it twice -- as the
+// object and as its deletion -- which TRINT_DELETE_COMM_OBJECT_KEYS refuses
+// because it counts the entry in the object list it is handed. Handed a list
+// with the entry once, it deletes every row of it from E071 and E071K, as its
+// DELETE does not look at OBJFUNC.
+//
+// That row goes without a lock flag. With one, the function first moves the
+// object's lock onto the other row, which is about to be deleted too, and
+// through ZADT_VSP's bridge that call never answered. The lock the task still
+// holds is then given back the way it is for any entry: the object is
+// appended to the task again, where it finds its own lock, and taken out.
+func removeRecordedTwice(ctx context.Context, bridge organizerBridge, task string, key TransportObjectKey, del func() (*RFCResult, error)) (*RFCResult, error) {
+	res, err := bridge.CallRFC(ctx, "TRINT_DELETE_COMM_OBJECT_KEYS", map[string]any{
+		"CS_REQUEST": map[string]any{
+			"H":              map[string]any{"TRKORR": task},
+			"OBJECTS_FILLED": "X",
+			"OBJECTS": []map[string]any{{
+				"TRKORR": task, "PGMID": key.PgmID, "OBJECT": key.Object, "OBJ_NAME": key.Name,
+			}},
+		},
+		"IS_E071_DELETE": map[string]any{"TRKORR": task, "PGMID": key.PgmID, "OBJECT": key.Object, "OBJ_NAME": key.Name},
+		"IV_DIALOG_FLAG": "",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("TRINT_DELETE_COMM_OBJECT_KEYS for an entry recorded twice: %w", err)
+	}
+	if res.Subrc != 0 {
+		return res, nil
+	}
+	app, err := bridge.CallRFC(ctx, "TR_APPEND_TO_COMM_OBJS_KEYS", map[string]any{
+		"WI_TRKORR": task,
+		"WT_E071":   []map[string]any{{"PGMID": key.PgmID, "OBJECT": key.Object, "OBJ_NAME": key.Name}},
+		"IV_DIALOG": "",
+	})
+	if err != nil || app.Subrc != 0 {
+		msg := ""
+		if err != nil {
+			msg = err.Error()
+		} else {
+			msg = app.Message
+		}
+		return res, fmt.Errorf("both entries of %s are out of %s, but the task may still hold its lock: appending it again to give the lock back failed%s", key, task, withMessage(msg))
+	}
+	return del()
 }
 
 // transportTree reads a request with its tasks and their entries. Asked for a
