@@ -205,6 +205,28 @@ func WriteSourceResultError(result *WriteSourceResult) error {
 	return fmt.Errorf("WriteSource failed: %s", message)
 }
 
+// writeSourceGate is WriteSource's early rejection: operation type,
+// transportable edits, and the package when the caller names one (create).
+//
+// The package of an existing object is deliberately not resolved here. Every
+// update path -- WriteProgram, WriteClass, WriteFunctionModule, the INTF and
+// DDLS/BDEF/SRVD/TABL branches -- gates again with the object's URL, which is
+// the only way to know the package of an object being updated. Asking the
+// full gate here without a URL or package failed every update as soon as
+// SAP_ALLOWED_PACKAGES was set: "WriteSource requires either ObjectURL or
+// Package when AllowedPackages is configured".
+func (c *Client) writeSourceGate(opts *WriteSourceOptions) error {
+	if err := c.checkSafety(OpWorkflow, "WriteSource"); err != nil {
+		return err
+	}
+	if opts.Package != "" {
+		if err := c.checkPackageSafety(opts.Package); err != nil {
+			return err
+		}
+	}
+	return c.checkTransportableEdit(opts.Transport, "WriteSource")
+}
+
 // WriteSource is a unified tool for writing ABAP source code across different object types.
 // Replaces WriteProgram, WriteClass, CreateAndActivateProgram, CreateClassWithTests.
 //
@@ -230,17 +252,7 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 		opts.Mode = WriteModeUpsert
 	}
 
-	// Top-level mutation gate. The precise package check runs in the
-	// delegated create/update path (CreateAndActivate* / WriteProgram /
-	// WriteClass) because the target package is known there; here we
-	// enforce op-type and transportable-edit policy up front so the caller
-	// gets a clear early rejection.
-	if err := c.checkMutation(ctx, MutationContext{
-		Op:        OpWorkflow,
-		OpName:    "WriteSource",
-		Package:   opts.Package, // empty for update path, present for create
-		Transport: opts.Transport,
-	}); err != nil {
+	if err := c.writeSourceGate(opts); err != nil {
 		return nil, err
 	}
 
