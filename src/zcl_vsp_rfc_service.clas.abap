@@ -802,7 +802,9 @@ CLASS ZCL_VSP_RFC_SERVICE IMPLEMENTATION.
           rv_json = |{ rv_json }{ lv_c }|.
         ENDLOOP.
       CATCH cx_root.
-        rv_json = |{ rv_json }{ lv_o }"error":"serialization failed"{ lv_c }|.
+        " A failure can come mid-row, after its '{' or a comma was written;
+        " appending to that gives invalid JSON. Start over with one element.
+        rv_json = |[{ lv_o }"error":"serialization failed"{ lv_c }|.
     ENDTRY.
     rv_json = |{ rv_json }]|.
   ENDMETHOD.
