@@ -443,6 +443,9 @@ func TestRecoverFailedCreate_LockHeldByAnother(t *testing.T) {
 	mock := &methodPathMock{
 		routes: []routedResponse{
 			resp("", "discovery", 200, "ok"),
+			// Without the package lookup the recovery stops at the mutation
+			// gate and never reaches the lock this test is about.
+			resp("", "informationsystem/search", 200, searchZTESTInTmpXML),
 			resp(http.MethodGet, "/programs/programs/ZTEST", 200, "<p/>"),
 			resp(http.MethodPost, "/programs/programs/ZTEST", 403, "locked by another user"),
 		},
@@ -456,6 +459,15 @@ func TestRecoverFailedCreate_LockHeldByAnother(t *testing.T) {
 	})
 	if pce == nil {
 		t.Fatal("expected PartialCreateError, got nil")
+	}
+	locked := false
+	for _, c := range mock.calls {
+		if c.method == http.MethodPost && strings.Contains(c.path, "/programs/programs/ZTEST") {
+			locked = true
+		}
+	}
+	if !locked {
+		t.Fatalf("recovery never tried to lock the object; calls: %#v", mock.calls)
 	}
 	if pce.CleanupOK {
 		t.Error("CleanupOK = true, want false — lock acquisition failed")
