@@ -244,13 +244,26 @@ func removeTransportObject(ctx context.Context, bridge organizerBridge, details 
 	if out.Task == "" {
 		return out, fmt.Errorf("%s is not in %s", key, details.Number)
 	}
-	res, err := bridge.CallRFC(ctx, "TRINT_DELETE_COMM_OBJECT_KEYS", map[string]any{
-		"CS_REQUEST":     map[string]any{"H": map[string]any{"TRKORR": out.Task}},
-		"IS_E071_DELETE": map[string]any{"PGMID": key.PgmID, "OBJECT": key.Object, "OBJ_NAME": key.Name},
-		"IV_DIALOG_FLAG": "",
-	})
+	del := func() (*RFCResult, error) {
+		return bridge.CallRFC(ctx, "TRINT_DELETE_COMM_OBJECT_KEYS", map[string]any{
+			"CS_REQUEST":     map[string]any{"H": map[string]any{"TRKORR": out.Task}},
+			"IS_E071_DELETE": map[string]any{"PGMID": key.PgmID, "OBJECT": key.Object, "OBJ_NAME": key.Name},
+			"IV_DIALOG_FLAG": "",
+		})
+	}
+	res, err := del()
 	if err != nil {
 		return out, fmt.Errorf("TRINT_DELETE_COMM_OBJECT_KEYS: %w", err)
+	}
+	// An entry recorded twice (deleting a structure records it again) is
+	// refused with "Object entry exists more than once; sort and compress
+	// first". That is what SE09's Sort and Compress is for; do it and retry.
+	if res.Subrc != 0 && strings.Contains(strings.ToLower(res.Message), "more than once") {
+		if _, cerr := bridge.CallRFC(ctx, "TR_SORT_AND_COMPRESS_COMM", map[string]any{"IV_TRKORR": out.Task}); cerr == nil {
+			if res, err = del(); err != nil {
+				return out, fmt.Errorf("TRINT_DELETE_COMM_OBJECT_KEYS after sort and compress: %w", err)
+			}
+		}
 	}
 	out.Message = res.Message
 	if res.Subrc != 0 {

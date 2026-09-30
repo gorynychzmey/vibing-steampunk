@@ -206,3 +206,36 @@ func TestTransportTree_ReadsTheRequestOfATask(t *testing.T) {
 		t.Errorf("a request number was read %d times, want once", len(mock.requests))
 	}
 }
+
+// sequenceOrganizer answers each call with the next result in line.
+type sequenceOrganizer struct {
+	fms     []string
+	results []RFCResult
+}
+
+func (s *sequenceOrganizer) CallRFC(_ context.Context, fm string, _ map[string]any) (*RFCResult, error) {
+	s.fms = append(s.fms, fm)
+	r := RFCResult{}
+	if len(s.results) > 0 {
+		r, s.results = s.results[0], s.results[1:]
+	}
+	return &r, nil
+}
+
+// An entry recorded twice is refused until the task is sorted and
+// compressed, as SE09 would; removal does that and tries again.
+func TestRemoveTransportObject_SortsAndCompressesADuplicate(t *testing.T) {
+	bridge := &sequenceOrganizer{results: []RFCResult{
+		{Subrc: 99, Message: "Object entry exists more than once; sort and compress first"},
+		{},
+		{},
+	}}
+	res, err := removeTransportObject(context.Background(), bridge, entriesRequest(), TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
+	if err != nil || !res.Removed {
+		t.Fatalf("removeTransportObject: %+v %v", res, err)
+	}
+	want := []string{"TRINT_DELETE_COMM_OBJECT_KEYS", "TR_SORT_AND_COMPRESS_COMM", "TRINT_DELETE_COMM_OBJECT_KEYS"}
+	if !reflect.DeepEqual(bridge.fms, want) {
+		t.Errorf("calls %v, want %v", bridge.fms, want)
+	}
+}
