@@ -44,6 +44,10 @@ func (s *Server) routeCRUDAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleCreateTable, params)
 		case "CLONE":
 			return s.callHandler(ctx, s.handleCloneObject, params)
+		case "ENHO":
+			return s.callHandler(ctx, s.handleCreateSourceCodePlugin, params)
+		case "BADI_IMPL":
+			return s.callHandler(ctx, s.handleCreateBadiImplementation, params)
 		case "DOMA":
 			return s.callHandler(ctx, s.handleCreateDomain, withName(params, objectName))
 		case "DTEL":
@@ -626,6 +630,25 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 	newPackage, ok := request.GetArguments()["new_package"].(string)
 	if !ok || newPackage == "" {
 		return newToolResultError("new_package is required"), nil
+	}
+
+	// Reassigning an object's package changes TADIR: an object change,
+	// refused under --read-only before the WebSocket connects. The
+	// WebSocket client carries no safety config of its own, so the gate is
+	// here, where both routes (edit MOVE, debug MOVE) and the tool meet.
+	if err := s.adtClient.Safety().CheckOperation(adt.OpUpdate, "MoveObject"); err != nil {
+		return newToolResultError(err.Error()), nil
+	}
+	// --allowed-packages covers both ends of the move: the target package,
+	// known without a request, and the package the object is in now, looked
+	// up through the repository search. Without the second, an object could
+	// be moved out of a package the server may not touch into one it may,
+	// and then edited.
+	if err := s.adtClient.Safety().CheckPackage(newPackage); err != nil {
+		return newToolResultError(err.Error()), nil
+	}
+	if err := s.adtClient.CheckObjectPackageByName(ctx, objectType, objectName); err != nil {
+		return newToolResultError(err.Error()), nil
 	}
 
 	// Ensure WebSocket client is connected

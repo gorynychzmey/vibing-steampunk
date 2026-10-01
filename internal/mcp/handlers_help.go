@@ -108,6 +108,16 @@ define structure zdemo {
   SAP(action="create", target="DTEL ZDEMO", params={"description": "Demo", "package": "$TMP", "domain": "ZDEMO",
       "short_label": "Demo", "medium_label": "Demo field", "long_label": "Demo field", "heading": "Demo"})   (or "data_type" + "length"; "search_help", "parameter_id")
 
+Enhancement implementation (source code plug-in, ENHO): list the options, then create one --
+  SAP(action="read", target="ENHANCEMENT_OPTIONS", params={"function_module": "BAPI_X"})   (or object_url, function_group, program, class; "filter")
+  SAP(action="create", target="ENHO", params={"name": "ZENH_DEMO", "description": "Demo", "package": "ZPKG", "transport": "A4HK900001",
+      "function_module": "BAPI_X", "option": "\\FU:BAPI_X\\SE:BEGIN\\EI", "source": "ENHANCEMENT 1  .\n  ...\nENDENHANCEMENT."})
+  Without "source" it is created inactive with an empty ENHANCEMENT block; with it the code is written and activated.
+
+BAdI implementation (ENHO): the implementing class must exist and implement the BAdI interface --
+  SAP(action="create", target="BADI_IMPL", params={"name": "ZENH_DEMO", "description": "Demo", "package": "ZPKG", "transport": "A4HK900001",
+      "spot": "BADI_X", "class": "ZCL_DEMO_BADI"})   ("badi" if the spot has several; "active": false = switched off; "activate": false)
+
 Class test include:
   SAP(action="create", target="CLAS_TEST_INCLUDE", params={"class_name": "ZCL_TEST", "lock_handle": "..."})
 
@@ -191,7 +201,15 @@ gateway is a different port and is often closed.
 
 Only remote-enabled function modules can be called. A module that is not
 marked remote is unreachable by every transport — a property of the module,
-not of the connection.`)
+not of the connection.
+
+The gateway is this server's own: rfc_host / rfc_sysnr / rfc_port of its
+.vsp.json entry, else derived from its URL. params host, sysnr and port may
+only repeat that destination; one that differs is refused, so the configured
+credentials never go elsewhere. params user picks another logon user.
+
+Under --read-only, "call" is refused. Under --block-free-sql, read_table with
+a "where" is refused.`)
 
 	case "i18n":
 		return mcp.NewToolResultText(`SAP(action="i18n") - Translation texts and language comparison
