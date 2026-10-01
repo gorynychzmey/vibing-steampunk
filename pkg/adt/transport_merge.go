@@ -151,7 +151,7 @@ func (c *Client) MoveTransportObject(ctx context.Context, ws *DebugWebSocketClie
 		return out, fmt.Errorf("reading %s: %w", to, err)
 	}
 	out.ToTask = targetTask(target, to, strings.ToUpper(c.config.Username))
-	if _, err := classifyTask(ctx, ws, c.requestHeader, target, out.ToTask); err != nil {
+	if _, err = classifyTask(ctx, ws, c.requestHeader, target, out.ToTask); err != nil {
 		return out, err
 	}
 

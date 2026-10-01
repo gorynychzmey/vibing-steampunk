@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
 
@@ -502,7 +503,7 @@ func (s *Server) handleAddTransportObjects(ctx context.Context, request mcp.Call
 	if err != nil {
 		return newToolResultError(err.Error()), nil
 	}
-	if err := s.ensureDebugWSClient(ctx); err != nil {
+	if err = s.ensureDebugWSClient(ctx); err != nil {
 		return newToolResultError(fmt.Sprintf("adding entries to a request needs ZADT_VSP's function bridge: %v", err)), nil
 	}
 	res, err := s.adtClient.AddTransportObjects(ctx, s.debugWSClient, transport, entries)
@@ -531,7 +532,7 @@ func (s *Server) handleRemoveTransportObject(ctx context.Context, request mcp.Ca
 	if err != nil {
 		return newToolResultError(err.Error()), nil
 	}
-	if err := s.ensureDebugWSClient(ctx); err != nil {
+	if err = s.ensureDebugWSClient(ctx); err != nil {
 		return newToolResultError(fmt.Sprintf("removing an entry from a request needs ZADT_VSP's function bridge: %v", err)), nil
 	}
 	res, err := s.adtClient.RemoveTransportObject(ctx, s.debugWSClient, transport, key)

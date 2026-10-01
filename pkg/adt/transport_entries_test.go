@@ -154,7 +154,7 @@ func TestAddTransportObjects_ClassifiesAnUnclassifiedTaskFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addTransportObjects: %v", err)
 	}
-	var fms []string
+	fms := make([]string, 0, len(bridge.calls))
 	for _, c := range bridge.calls {
 		fms = append(fms, c.fm)
 	}
@@ -185,7 +185,7 @@ func TestTransportTree_ReadsTheRequestOfATask(t *testing.T) {
 </tm:root>`
 	c, mock := newTransportTestClient(t, map[string][]string{
 		"/sap/bc/adt/cts/transportrequests/TR-EXAMPLE-T": {header},
-		"/sap/bc/adt/cts/transportrequests/TR-EXAMPLE": {full},
+		"/sap/bc/adt/cts/transportrequests/TR-EXAMPLE":   {full},
 	})
 	details, err := c.transportTree(context.Background(), "TR-EXAMPLE-T")
 	if err != nil {
@@ -281,8 +281,8 @@ func TestTransportEntries_HonourANamedTask(t *testing.T) {
 	if err != nil || res.Task != "TR-OTHER" {
 		t.Fatalf("add to a named task: %+v %v", res, err)
 	}
-	if _, err := removeTransportObject(context.Background(), &sequenceOrganizer{}, entriesRequest(), "TR-MINE", TransportObjectKey{"R3TR", "PROG", "ZDEMO"}); err == nil || !strings.Contains(err.Error(), "not in TR-MINE") {
-		t.Errorf("remove from a named task that does not hold it: %v", err)
+	if _, rerr := removeTransportObject(context.Background(), &sequenceOrganizer{}, entriesRequest(), "TR-MINE", TransportObjectKey{"R3TR", "PROG", "ZDEMO"}); rerr == nil || !strings.Contains(rerr.Error(), "not in TR-MINE") {
+		t.Errorf("remove from a named task that does not hold it: %v", rerr)
 	}
 	res2, err := removeTransportObject(context.Background(), &sequenceOrganizer{}, entriesRequest(), "TR-OTHER", TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
 	if err != nil || res2.Task != "TR-OTHER" {
