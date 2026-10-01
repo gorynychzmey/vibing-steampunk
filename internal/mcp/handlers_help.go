@@ -90,8 +90,33 @@ Create object:
   SAP(action="create", target="OBJECT", params={"object_type": "FUGR/F", "name": "ZVSP_DEMO", "description": "Demo group", "package_name": "$TMP"})
   SAP(action="create", target="OBJECT", params={"object_type": "FUGR/FF", "name": "ZVSP_DEMO_FM", "parent_name": "ZVSP_DEMO", "description": "RFC demo", "package_name": "$TMP", "rfc_enabled": true, "source": "FUNCTION zvsp_demo_fm\n  IMPORTING VALUE(iv_n) TYPE i\n  EXPORTING VALUE(ev_result) TYPE i.\n  ev_result = iv_n * 2.\nENDFUNCTION."})
   SAP(action="create", target="DEVC", params={"name": "$ZNEW", "description": "New package"})
+  SAP(action="create", target="OBJECT", params={"object_type": "MSAG/N", "name": "ZDEMO", "description": "Demo messages", "package_name": "$TMP", "language": "DE", "messages": {"001": "Auftrag & nicht gefunden"}})
   SAP(action="create", target="TABL", params={"name": "ZTABLE", "description": "New table", "fields": "[...]", "package": "$TMP"})
   SAP(action="create", target="CLONE", params={"object_type": "CLAS", "source_name": "ZCL_OLD", "target_name": "ZCL_NEW", "package": "$TMP"})
+  SAP(action="create", target="STRUCT", params={"description": "Demo", "package": "$TMP",
+      "source": "@AbapCatalog.enhancement.category : #EXTENSIBLE_ANY
+define structure zdemo {
+  matnr : matnr;
+}"})
+  SAP(action="create", target="APPEND", params={"description": "Demo append", "package": "ZPKG", "transport": "A4HK900001",
+      "source": "extend type shp_vl10_item with zappend_demo {
+  zzflag : abap_boolean;
+}"})
+      (name and base come from the DDL; activation is checked against the inactive list)
+  SAP(action="create", target="DOMA ZDEMO", params={"description": "Demo", "package": "$TMP", "data_type": "CHAR", "length": 2,
+      "fixed_values": [{"low": "A", "text": "Alpha"}]})   ("decimals", "output_length", "lowercase", "signed", "conversion_exit", "value_table")
+  SAP(action="create", target="DTEL ZDEMO", params={"description": "Demo", "package": "$TMP", "domain": "ZDEMO",
+      "short_label": "Demo", "medium_label": "Demo field", "long_label": "Demo field", "heading": "Demo"})   (or "data_type" + "length"; "search_help", "parameter_id")
+
+Enhancement implementation (source code plug-in, ENHO): list the options, then create one --
+  SAP(action="read", target="ENHANCEMENT_OPTIONS", params={"function_module": "BAPI_X"})   (or object_url, function_group, program, class; "filter")
+  SAP(action="create", target="ENHO", params={"name": "ZENH_DEMO", "description": "Demo", "package": "ZPKG", "transport": "A4HK900001",
+      "function_module": "BAPI_X", "option": "\\FU:BAPI_X\\SE:BEGIN\\EI", "source": "ENHANCEMENT 1  .\n  ...\nENDENHANCEMENT."})
+  Without "source" it is created inactive with an empty ENHANCEMENT block; with it the code is written and activated.
+
+BAdI implementation (ENHO): the implementing class must exist and implement the BAdI interface --
+  SAP(action="create", target="BADI_IMPL", params={"name": "ZENH_DEMO", "description": "Demo", "package": "ZPKG", "transport": "A4HK900001",
+      "spot": "BADI_X", "class": "ZCL_DEMO_BADI"})   ("badi" if the spot has several; "active": false = switched off; "activate": false)
 
 Class test include:
   SAP(action="create", target="CLAS_TEST_INCLUDE", params={"class_name": "ZCL_TEST", "lock_handle": "..."})
@@ -117,8 +142,16 @@ High-level create (with source):
 Table contents:
   SAP(action="query", target="TABL_CONTENTS ZTABLE", params={"max_rows": 50})
 
-Free SQL:
-  SAP(action="query", target="SQL", params={"sql_query": "SELECT * FROM T000 WHERE MANDT = '001'", "max_rows": 100})`)
+Free SQL (ABAP SQL, read in the logon client):
+  SAP(action="query", target="SQL", params={"sql_query": "SELECT * FROM T000 WHERE MANDT = '001'", "max_rows": 100})
+  SAP(action="query", params={"sql": "SELECT h~trkorr, t~as4text FROM e070 AS h INNER JOIN e07t AS t ON t~trkorr = h~trkorr ORDER BY h~trkorr DESCENDING"})
+
+The data preview wraps the statement in its own SELECT ... INTO, so it takes
+ABAP SQL only. vsp rewrites the common ANSI spellings before sending -- t.col to
+t~col, DESC/ASC to DESCENDING/ASCENDING, a closing period -- and says so in
+"Notes". A refused query comes back with SAP's message and a hint: the columns
+the table does have, what a name it cannot find is, or that the client field
+of a client-specific table cannot be in the WHERE condition.`)
 
 	case "test":
 		return mcp.NewToolResultText(`SAP(action="test") - Run tests
@@ -181,7 +214,15 @@ user, with that user's authorizations, and does whatever the report does.
 
 Only remote-enabled function modules can be called. A module that is not
 marked remote is unreachable by every transport — a property of the module,
-not of the connection.`)
+not of the connection.
+
+The gateway is this server's own: rfc_host / rfc_sysnr / rfc_port of its
+.vsp.json entry, else derived from its URL. params host, sysnr and port may
+only repeat that destination; one that differs is refused, so the configured
+credentials never go elsewhere. params user picks another logon user.
+
+Under --read-only, "call" is refused. Under --block-free-sql, read_table with
+a "where" is refused.`)
 
 	case "i18n":
 		return mcp.NewToolResultText(`SAP(action="i18n") - Translation texts and language comparison
@@ -202,7 +243,8 @@ A report's or a class's text pool — selection texts (S), text symbols (I), hea
 What differs between two languages — named separately, not as a list:
   SAP(action="i18n", params={"op": "compare_languages", "object_url": "/sap/bc/adt/oo/classes/zcl_demo", "source_language": "EN", "target_language": "DE"})
 
-Writing needs a lock_handle from a lock taken first, and changes the system:
+Writing changes the system; without lock_handle the call locks and unlocks itself.
+write_message_texts adds new message numbers and leaves the others as they are:
   SAP(action="i18n", params={"op": "write_message_texts", "name": "ZVSP_GIT", "language": "DE", "lock_handle": "...", "texts": []})
   SAP(action="i18n", params={"op": "texts_set", "program_name": "ZDEMO_RUN", "texts": {"P_DEVC": "Package to scan"}})
   SAP(action="i18n", params={"op": "texts_set", "program_name": "ZDEMO_RUN", "texts": {"selections": {"S_OBJ": "Object names"}, "symbols": {"001": "Nothing found"}}, "dry_run": true})
@@ -484,6 +526,7 @@ Transports:
   SAP(action="system", params={"type": "list_transports", "request_status": "R", "released_from": "20260101", "released_to": "20261231"})
   SAP(action="system", params={"type": "get_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "create_transport", "description": "...", "package": "$TMP"})
+  SAP(action="system", params={"type": "create_transport", "description": "...", "package": "ZDEMO", "cts_project": "PRJ_DEMO", "target": "/GROUP/"})  - filed under a CTS project (default: --cts-project)
   SAP(action="system", params={"type": "release_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "delete_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "merge_transports", "source": ["A4HK900001", "A4HK900003"], "target": "A4HK900005"})
