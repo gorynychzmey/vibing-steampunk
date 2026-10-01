@@ -13,7 +13,8 @@ import (
 
 // handleImportTransport imports released requests into the system this server
 // is connected to, as STMS_IMPORT does there:
-// SAP(action="system", params={"type": "import_transport", "transport": "TR-A", "client": "100"}).
+// SAP(action="system", params={"type": "import_transport", "transport": "TR-A"}).
+// The client is this server's own; a "client" naming another one is refused.
 // It goes over classic RFC to CTS_API_IMPORT_CHANGE_REQUEST in that system; the
 // target is always this server's own system (see saprfc.ImportRequests).
 func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -31,9 +32,13 @@ func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallTool
 	if err := safety.CheckTransportImport(requests); err != nil {
 		return newToolResultError(err.Error()), nil
 	}
-	client := getStringParam(args, "client")
-	if client == "" {
-		client = s.config.Client
+	// The import goes into this server's own client. The opt-in and every
+	// switch above belong to the system entry this server was configured
+	// with -- URL and client -- so a per-call client is taken only when it
+	// names that client.
+	client, err := importClient(getStringParam(args, "client"), s.config.Client)
+	if err != nil {
+		return newToolResultError(err.Error()), nil
 	}
 
 	timeout := saprfc.ImportTimeout
@@ -76,6 +81,24 @@ func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallTool
 		return out, nil
 	}
 	return newToolResultJSON(res), nil
+}
+
+// importClient is the client an import goes into: this server's own. A
+// per-call client is accepted only when it names the same client; any other
+// would import into a client the opt-in and the safety settings were never
+// configured for.
+func importClient(perCall, own string) (string, error) {
+	perCall, own = strings.TrimSpace(perCall), strings.TrimSpace(own)
+	if perCall == "" || perCall == own {
+		return own, nil
+	}
+	if own == "" {
+		return "", fmt.Errorf("import_transport client %q is blocked: this server has no client of its own "+
+			"configured, and an import goes only into the client its system entry names", perCall)
+	}
+	return "", fmt.Errorf("import_transport client %q is blocked: it differs from this server's own client %s, "+
+		"and the import's opt-in and safety settings belong to that client (configure the other client as "+
+		"its own system in .vsp.json and use a server connected to it)", perCall, own)
 }
 
 // importDestinationOverrides are the rfcDestination parameters that would

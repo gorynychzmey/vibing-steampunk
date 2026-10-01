@@ -101,3 +101,40 @@ func TestHandleImportTransport_RefusesDestinationOverrides(t *testing.T) {
 		})
 	}
 }
+
+// The opt-in and the safety settings belong to this server's own client; a
+// per-call client naming another one is refused before any connection.
+func TestHandleImportTransport_RefusesAnotherClient(t *testing.T) {
+	server := NewServer(&Config{
+		BaseURL: "https://unreachable.invalid:44300", Username: "u", Password: "p", Client: "100",
+		AllowTransportImport: true,
+	})
+	res, err := server.handleImportTransport(context.Background(),
+		newRequest(map[string]any{"transport": "TR-EXAMPLE", "client": "200"}))
+	if err != nil {
+		t.Fatalf("handleImportTransport: %v", err)
+	}
+	text := resultText(res)
+	if !res.IsError || !strings.Contains(text, `client "200" is blocked`) || !strings.Contains(text, "100") {
+		t.Errorf("want a refusal of client 200 naming the own client 100, got %s", text)
+	}
+}
+
+func TestImportClient(t *testing.T) {
+	for _, tc := range []struct {
+		perCall, own, want string
+		refused            bool
+	}{
+		{"", "100", "100", false},
+		{"100", "100", "100", false},
+		{" 100 ", "100", "100", false},
+		{"200", "100", "", true},
+		{"200", "", "", true},
+		{"", "", "", false}, // no client at all: saprfc refuses it before calling
+	} {
+		got, err := importClient(tc.perCall, tc.own)
+		if (err != nil) != tc.refused || got != tc.want {
+			t.Errorf("importClient(%q, %q) = %q, %v; want %q, refused=%v", tc.perCall, tc.own, got, err, tc.want, tc.refused)
+		}
+	}
+}

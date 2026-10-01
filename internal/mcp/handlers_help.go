@@ -507,7 +507,7 @@ Transports:
   SAP(action="system", params={"type": "create_transport", "description": "...", "package": "$TMP"})
   SAP(action="system", params={"type": "create_transport", "description": "...", "package": "ZDEMO", "cts_project": "PRJ_DEMO", "target": "/GROUP/"})  - filed under a CTS project (default: --cts-project)
   SAP(action="system", params={"type": "release_transport", "transport": "A4HK900001"})
-  SAP(action="system", params={"type": "import_transport", "transport": "A4HK900001", "client": "100"})  - import into THIS system, as STMS_IMPORT (classic RFC; needs allow_transport_import)
+  SAP(action="system", params={"type": "import_transport", "transport": "A4HK900001"})  - import into THIS system and client, as STMS_IMPORT (classic RFC; needs allow_transport_import)
       waits up to "timeout" seconds (default 3600); "async": true returns a task_id at once --
   SAP(action="debug", target="GET_ASYNC_RESULT", params={"task_id": "...", "wait_seconds": 600})  - waits for it
   SAP(action="system", params={"type": "import_status", "transport": "A4HK900001", "since": "20260101120000"})  - tp steps from TPALOG, also after a restart

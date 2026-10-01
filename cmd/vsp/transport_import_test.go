@@ -32,3 +32,16 @@ func TestCheckImportAllowed(t *testing.T) {
 		})
 	}
 }
+
+// --client is taken only when it names the system's own client.
+func TestImportClient(t *testing.T) {
+	if got, err := importClient("", "100"); err != nil || got != "100" {
+		t.Errorf("no flag: %q, %v", got, err)
+	}
+	if got, err := importClient("100", "100"); err != nil || got != "100" {
+		t.Errorf("own client: %q, %v", got, err)
+	}
+	if _, err := importClient("200", "100"); err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("another client: %v, want a refusal", err)
+	}
+}
