@@ -101,7 +101,7 @@ func normalizeOpenSQL(q string) (string, []string) {
 		dotted[q[m[2]:m[3]]] = true
 	}
 	if len(dotted) > 0 {
-		var ns []string
+		ns := make([]string, 0, len(dotted))
 		for n := range dotted {
 			ns = append(ns, n)
 		}
@@ -296,7 +296,8 @@ func editDistance(a, b string) int {
 			if a[i-1] == b[j-1] {
 				cost = 0
 			}
-			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+			// Two-argument min: the integration tests declare their own.
+			cur[j] = min(min(prev[j]+1, cur[j-1]+1), prev[j-1]+cost)
 		}
 		prev = cur
 	}
