@@ -40,22 +40,30 @@ type Client struct {
 // NewClient creates a new ADT client with the given configuration.
 func NewClient(baseURL, username, password string, opts ...Option) *Client {
 	cfg := NewConfig(baseURL, username, password, opts...)
-	return NewClientWithTransport(cfg, NewTransport(cfg))
+	return newClient(cfg, NewTransport(cfg))
 }
 
-// NewClientWithTransport creates a new client with a custom transport.
-// This is useful for testing.
-func NewClientWithTransport(cfg *Config, transport *Transport) *Client {
+// newClient wires a client to its transport, including the lock window the
+// transport consults before reloading a cookie file and while routing
+// stateless requests.
+func newClient(cfg *Config, transport *Transport) *Client {
 	c := &Client{
 		transport: transport,
 		config:    cfg,
 	}
 	if transport != nil {
+		transport.lockOutstanding = c.lockOutstanding
 		// The transport keeps stateless requests out of the context a lock
 		// handle is bound to while one is outstanding (see Transport.do).
 		transport.locks = &c.locks
 	}
 	return c
+}
+
+// NewClientWithTransport creates a new client with a custom transport.
+// This is useful for testing.
+func NewClientWithTransport(cfg *Config, transport *Transport) *Client {
+	return newClient(cfg, transport)
 }
 
 // StartKeepAlive starts a background goroutine that periodically pings the SAP server

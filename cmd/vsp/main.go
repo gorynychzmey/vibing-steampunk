@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -147,7 +148,11 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.EnableTransports, "enable-transports", false, "Enable transport management operations (disabled by default for safety)")
 	rootCmd.Flags().BoolVar(&cfg.TransportReadOnly, "transport-read-only", false, "Only allow read operations on transports (list, get)")
 	rootCmd.Flags().StringSliceVar(&cfg.AllowedTransports, "allowed-transports", nil, "Restrict transport operations to specific transports (comma-separated, supports wildcards like A4HK*)")
-	rootCmd.Flags().BoolVar(&cfg.AllowTransportableEdits, "allow-transportable-edits", false, "Allow editing objects in transportable packages (requires transport parameter)")
+	// This is persistent because CLI subcommands such as `source write` must
+	// receive the same explicit transportable-edit opt-in as the MCP server.
+	// Keep it separate from the other root-only safety flags: moving all of
+	// them would broaden this command-line surface without solving #117.
+	rootCmd.PersistentFlags().BoolVar(&cfg.AllowTransportableEdits, "allow-transportable-edits", false, "Allow editing objects in transportable packages (requires transport parameter)")
 	rootCmd.Flags().StringVar(&cfg.TransportChoice, "transport-choice", "auto", "A write with no transport named: auto picks the object's own or an open request of yours that fits (and creates one with --enable-transports); off leaves it to SAP, which generates a request per write")
 
 	// Mode options
@@ -205,7 +210,7 @@ func init() {
 	viper.BindPFlag("enable-transports", rootCmd.Flags().Lookup("enable-transports"))
 	viper.BindPFlag("transport-read-only", rootCmd.Flags().Lookup("transport-read-only"))
 	viper.BindPFlag("allowed-transports", rootCmd.Flags().Lookup("allowed-transports"))
-	viper.BindPFlag("allow-transportable-edits", rootCmd.Flags().Lookup("allow-transportable-edits"))
+	viper.BindPFlag("allow-transportable-edits", rootCmd.PersistentFlags().Lookup("allow-transportable-edits"))
 	viper.BindPFlag("mode", rootCmd.Flags().Lookup("mode"))
 	viper.BindPFlag("disabled-groups", rootCmd.Flags().Lookup("disabled-groups"))
 	viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
@@ -456,6 +461,11 @@ func resolveConfig(cmd *cobra.Command) {
 	}
 	if !cmd.Flags().Changed("allow-transportable-edits") {
 		cfg.AllowTransportableEdits = viper.GetBool("ALLOW_TRANSPORTABLE_EDITS")
+	}
+	// The server's own system in .vsp.json, for its per-system settings.
+	cfg.SystemName = systemName
+	if cfg.SystemName == "" {
+		cfg.SystemName = viper.GetString("SYSTEM")
 	}
 	if !cmd.Flags().Changed("transport-choice") {
 		if v := viper.GetString("TRANSPORT_CHOICE"); v != "" {
@@ -798,8 +808,9 @@ func processCookieAuth(cmd *cobra.Command) error {
 
 	// Process cookie file
 	if cookieFile != "" {
-		if _, err := os.Stat(cookieFile); os.IsNotExist(err) {
-			return fmt.Errorf("cookie file not found: %s", cookieFile)
+		cookieFile, err := filepath.Abs(cookieFile)
+		if err != nil {
+			return fmt.Errorf("resolving cookie file path: %w", err)
 		}
 
 		cookies, err := adt.LoadCookiesFromFile(cookieFile)
@@ -812,6 +823,12 @@ func processCookieAuth(cmd *cobra.Command) error {
 		}
 
 		cfg.Cookies = cookies
+		reauth, err := adt.NewCookieFileReauthFunc(cookieFile)
+		if err != nil {
+			return err
+		}
+		cfg.ReauthFunc = reauth
+		cfg.ReauthReadOnly = true
 		if cfg.Verbose {
 			fmt.Fprintf(os.Stderr, "[VERBOSE] Loaded %d cookies from file: %s\n", len(cookies), cookieFile)
 		}
