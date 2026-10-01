@@ -84,6 +84,7 @@ func (s *Server) handleUniversalTool(ctx context.Context, request mcp.CallToolRe
 		// Ahead of the source and read routers, which would take "SEGM" for
 		// an object type they do not know.
 		s.routeIDocSegmentAction,
+		s.routeIDocExtensionAction,
 		s.routeSourceAction,
 		s.routeReadAction,
 		s.routeSearchAction,

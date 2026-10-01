@@ -34,7 +34,7 @@ var ErrJobNotEnded = errors.New("the background job has not ended")
 
 // tempReportPrefixes are the names vsp gives its temporary reports. Only these,
 // followed by the creation time, are ever swept.
-var tempReportPrefixes = []string{"ZTEMP_SXCI_", "ZTEMP_SXCD_", "ZTEMP_SEGM_"}
+var tempReportPrefixes = []string{"ZTEMP_SXCI_", "ZTEMP_SXCD_", "ZTEMP_SEGM_", "ZTEMP_IEXT_"}
 
 // tempReportMaxAge is how old a temporary report must be before a later run
 // takes it for one left behind. No vsp job waits nearly this long.

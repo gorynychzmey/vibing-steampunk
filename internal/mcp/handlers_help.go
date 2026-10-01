@@ -26,6 +26,7 @@ Read source with context (recommended):
   SAP(action="read", target="CLAS ZCL_TEST")
   SAP(action="read", target="PROG ZREPORT")
   SAP(action="read", target="SEGM Z1DEMO")      IDoc segment type: fields, versions, release state (over RFC)
+  SAP(action="read", target="IEXT ZDELVRY07")   IDoc extension: basic type, added segments, release state (over RFC)
   SAP(action="read", target="INTF ZIF_TEST")
   SAP(action="read", target="FUNC ZGET_DATA", params={"parent": "ZFUNC_GROUP"})
   SAP(action="read", target="DDLS ZDDL_VIEW")
@@ -70,6 +71,12 @@ is reopened, changed and released again; released in an older one, a new version
   SAP(action="edit", target="SEGM Z1DEMO", params={"fields": ["MATNR MATNR", "FLAG CHAR1", "STAMP TIMESTAMP"], "transport": "A4HK900001"})
   SAP(action="edit", target="SEGM Z1DEMO", params={"release": true, "transport": "A4HK900001"})   release; false reopens
 
+IDoc extension (WE30): "segments" is the complete new list; a released extension keeps its segments as they are and
+takes new ones. Only an extension released in this SAP release is changed or reopened -- an earlier release is
+refused (note 844899):
+  SAP(action="edit", target="IEXT ZDELVRY07", params={"segments": [...], "description": "...", "transport": "A4HK900001"})
+  SAP(action="edit", target="IEXT ZDELVRY07", params={"release": false, "transport": "A4HK900001"})   cancel the release
+
 Method-level edit (CLAS only):
   SAP(action="edit", target="CLAS ZCL_TEST", params={"source": "METHOD get_data...ENDMETHOD.", "method": "GET_DATA"})
 
@@ -113,6 +120,12 @@ are recorded in the request by SAP itself:
       "transport": "A4HK900001", "fields": [{"name": "MATNR", "data_element": "MATNR"}, "FLAG CHAR1"], "release": true})
   "qualified": true makes it a qualified segment; "iso_code": true on a field converts it to its ISO code.
 
+IDoc extension (WE30) of a basic type, as a background job over RFC; SAP records it (R3TR IEXT):
+  SAP(action="create", target="IEXT ZDELVRY07", params={"basic_type": "DELVRY07", "description": "Demo extension",
+      "package": "ZPKG", "transport": "A4HK900001", "segments": [{"segment": "Z1DEMO", "parent": "E1EDL20", "min": 1, "max": 1},
+      {"segment": "Z1DEMOSUB", "parent": "Z1DEMO", "max": 99}], "release": true})
+  A parent is a segment of the basic type or one the extension adds before it; "mandatory": true, min/max default 1.
+
 Class test include:
   SAP(action="create", target="CLAS_TEST_INCLUDE", params={"class_name": "ZCL_TEST", "lock_handle": "..."})
 
@@ -125,7 +138,8 @@ High-level create (with source):
 
   SAP(action="delete", target="OBJECT", params={"object_url": "/sap/bc/adt/oo/classes/zcl_test", "lock_handle": "..."})
   SAP(action="delete", target="SXCI ZIMP_DEMO", params={"transport": "A4HK900001"})   classic BAdI implementation with its class ("keep_class": true keeps it)
-  SAP(action="delete", target="SEGM Z1DEMO", params={"transport": "A4HK900001"})   IDoc segment type with all its versions`)
+  SAP(action="delete", target="SEGM Z1DEMO", params={"transport": "A4HK900001"})   IDoc segment type with all its versions
+  SAP(action="delete", target="IEXT ZDELVRY07", params={"transport": "A4HK900001"})   IDoc extension (released in this release: cancelled first)`)
 
 	case "search":
 		return mcp.NewToolResultText(`SAP(action="search") - Search for objects
@@ -668,7 +682,7 @@ func getUnhandledErrorMessage(action, objectType, objectName string) string {
 		sb.WriteString("Supported read targets: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, TABL, TABL_CONTENTS, DEVC, MSAG, TRAN, TYPE_INFO, STRUCT, CDS_DEPS, IDOC\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"read\") for examples.")
 	case "edit":
-		sb.WriteString("Supported edit targets: CLAS, PROG, INTF, FUNC, DDLS, BDEF, SRVD, TABL, SEGM, LOCK, UNLOCK, UPDATE_SOURCE, ACTIVATE, ACTIVATE_PACKAGE, EDITSOURCE, PUBLISH_SERVICE, UNPUBLISH_SERVICE\n")
+		sb.WriteString("Supported edit targets: CLAS, PROG, INTF, FUNC, DDLS, BDEF, SRVD, TABL, SEGM, IEXT, LOCK, UNLOCK, UPDATE_SOURCE, ACTIVATE, ACTIVATE_PACKAGE, EDITSOURCE, PUBLISH_SERVICE, UNPUBLISH_SERVICE\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"edit\") for examples.")
 	case "create":
 		sb.WriteString("Supported create targets: OBJECT, DEVC, TABL, CLONE, PROGRAM, CLASS_WITH_TESTS, CLAS_TEST_INCLUDE\n")
