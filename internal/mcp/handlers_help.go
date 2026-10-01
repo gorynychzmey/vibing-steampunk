@@ -178,7 +178,8 @@ job status, its spool list and its job log:
   SAP(action="rfc", target="ZREPORT", params={"op": "run", "params": [{"name": "S_DATUM", "option": "BT", "low": "20260101", "high": "20260131"}]})
 A job still running when the wait ends is picked up later with its name and count:
   SAP(action="rfc", target="VSP_ZREPORT", params={"op": "job", "job_count": "12345678"})
-"spool": false and "joblog": false leave either out. The job runs as the RFC
+"spool": false and "joblog": false leave either out; "spool_max_bytes" caps the spool
+(default 256 KB, cut at a line end; "spool_truncated" says so). The job runs as the RFC
 user, with that user's authorizations, and does whatever the report does.
 
 Only remote-enabled function modules can be called. A module that is not
