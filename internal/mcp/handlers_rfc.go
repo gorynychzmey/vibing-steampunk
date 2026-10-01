@@ -59,11 +59,8 @@ func (s *Server) routeRFCAction(ctx context.Context, action, objectType, objectN
 	// With an explicit op the name may also come as a named parameter, which is
 	// how the help has always spelled read_table and search.
 	if name == "" {
-		for _, key := range []string{"report", "job_name", "table", "pattern", "function"} {
-			if v := strings.TrimSpace(getStringParam(params, key)); v != "" {
-				name = v
-				break
-			}
+		if key := rfcNameKey(op); key != "" {
+			name = strings.TrimSpace(getStringParam(params, key))
 		}
 	}
 
@@ -349,7 +346,7 @@ func readJobOutput(ctx context.Context, c *openrfc.Client, run *saprfc.JobRun, p
 		if spool, err := saprfc.ReadSpool(ctx, c, run.JobName, run.JobCount); err != nil {
 			run.Spool = "spool unavailable: " + err.Error()
 		} else {
-			run.Spool = spool
+			run.Spool, run.SpoolTruncated = truncateAtLine(spool, intParam(params, "spool_max_bytes", defaultSpoolMaxBytes))
 		}
 	}
 	if want, ok := getBoolParam(params, "joblog"); (!ok || want) && ended {
@@ -439,4 +436,40 @@ func scalar(v any) string {
 		return ""
 	}
 	return fmt.Sprint(v)
+}
+
+// rfcNameKey is the named parameter that may carry an op's object name when
+// the target leaves it out. Only the one the op takes: a job_name given to
+// "run" is not the report to run.
+func rfcNameKey(op string) string {
+	switch op {
+	case "run":
+		return "report"
+	case "job":
+		return "job_name"
+	case "read_table", "read-table", "table":
+		return "table"
+	case "search":
+		return "pattern"
+	case "describe", "call":
+		return "function"
+	}
+	return ""
+}
+
+// defaultSpoolMaxBytes caps the spool list a run returns: a report without
+// limits can print far more than one MCP message should carry.
+const defaultSpoolMaxBytes = 256 * 1024
+
+// truncateAtLine cuts s to at most max bytes at a line end, and says whether
+// it cut. A max of zero or less keeps everything.
+func truncateAtLine(s string, max int) (string, bool) {
+	if max <= 0 || len(s) <= max {
+		return s, false
+	}
+	cut := s[:max]
+	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
+		cut = cut[:i+1]
+	}
+	return cut, true
 }

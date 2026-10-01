@@ -27,6 +27,11 @@ type rfcClassicBadiRunner struct {
 func (r rfcClassicBadiRunner) RunReport(ctx context.Context, program string) ([]string, error) {
 	run, err := saprfc.RunReportWith(ctx, r.c, saprfc.ReportRequest{Report: program, JobName: "VSP_" + program, Wait: classicBadiWait})
 	if err != nil {
+		// After the start the job may still be queued or running and need
+		// its report, however the wait for it ended.
+		if run != nil && run.Started {
+			return nil, fmt.Errorf("job %s / %s started, but its end is unknown (%v): %w", run.JobName, run.JobCount, err, adt.ErrJobNotEnded)
+		}
 		return nil, err
 	}
 	if run.Status != "F" && run.Status != "A" {

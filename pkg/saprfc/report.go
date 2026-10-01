@@ -34,6 +34,11 @@ type JobRun struct {
 	StatusFor string        `json:"status_text,omitempty"` // human reading of that letter
 	Spool     string        `json:"spool,omitempty"`       // spool list, when requested and available
 	JobLog    []JobLogEntry `json:"job_log,omitempty"`     // job log, when requested
+	// Started is set once BAPI_XBP_JOB_START_ASAP succeeded: from then on an
+	// error says nothing about the job, which may be queued or running.
+	Started bool `json:"started"`
+	// SpoolTruncated says Spool holds only the first part of the list.
+	SpoolTruncated bool `json:"spool_truncated,omitempty"`
 }
 
 // jobStatusText turns a TBTCO status letter into words.
@@ -93,57 +98,64 @@ func RunReportWith(ctx context.Context, c *rfc.Client, r ReportRequest) (*JobRun
 		jobName = jobName[:32]
 	}
 
-	if err := xmiLogon(ctx, c); err != nil {
-		return nil, err
-	}
-	defer func() { _, _ = c.Call(ctx, "BAPI_XMI_LOGOFF", rfc.Params{"INTERFACE": "XBP"}) }()
-
 	run := &JobRun{Report: report, JobName: jobName}
-
-	opened, err := c.Call(ctx, "BAPI_XBP_JOB_OPEN", rfc.Params{
-		"JOBNAME": jobName, "EXTERNAL_USER_NAME": xbpUser,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("BAPI_XBP_JOB_OPEN: %w", err)
-	}
-	if err := bapiError("BAPI_XBP_JOB_OPEN", opened.Get("RETURN")); err != nil {
-		return nil, err
-	}
-	run.JobCount = strings.TrimSpace(fmt.Sprint(opened.Get("JOBCOUNT")))
-
-	// A job that was opened but never started stays in SM37 as "scheduled"
-	// forever. If anything below fails before the start, take it out again.
-	started := false
-	defer func() {
-		if !started {
-			_ = deleteJob(ctx, c, jobName, run.JobCount)
+	// The XBP calls share the XMI session BAPI_XMI_LOGON opened, so they run
+	// on one pinned connection; a pooled Client.Call may land on another.
+	err := withXMI(ctx, c, func(s caller) error {
+		opened, err := s.Call(ctx, "BAPI_XBP_JOB_OPEN", rfc.Params{
+			"JOBNAME": jobName, "EXTERNAL_USER_NAME": xbpUser,
+		})
+		if err != nil {
+			return fmt.Errorf("BAPI_XBP_JOB_OPEN: %w", err)
 		}
-	}()
+		if err := bapiError("BAPI_XBP_JOB_OPEN", opened.Get("RETURN")); err != nil {
+			return err
+		}
+		run.JobCount = strings.TrimSpace(fmt.Sprint(opened.Get("JOBCOUNT")))
 
-	step := abapStep(jobName, run.JobCount, report, r.Variant, params)
-	added, err := c.Call(ctx, "BAPI_XBP_JOB_ADD_ABAP_STEP", step)
-	if err != nil {
-		return run, fmt.Errorf("BAPI_XBP_JOB_ADD_ABAP_STEP: %w", err)
-	}
-	if err := bapiError("BAPI_XBP_JOB_ADD_ABAP_STEP", added.Get("RETURN")); err != nil {
-		return run, err
-	}
+		// A job that was opened but never started stays in SM37 as "scheduled"
+		// forever. If anything below fails before the start, take it out again
+		// -- also when the caller gave up, the likeliest reason it failed.
+		defer func() {
+			if !run.Started {
+				cctx, cancel := cleanupContext(ctx)
+				defer cancel()
+				_ = deleteJob(cctx, s, jobName, run.JobCount)
+			}
+		}()
 
-	server, err := applicationServer(ctx, c)
-	if err != nil {
-		return run, err
-	}
-	start, err := c.Call(ctx, "BAPI_XBP_JOB_START_ASAP", rfc.Params{
-		"JOBNAME": jobName, "JOBCOUNT": run.JobCount,
-		"EXTERNAL_USER_NAME": xbpUser, "TARGET_SERVER": server,
+		step := abapStep(jobName, run.JobCount, report, r.Variant, params)
+		added, err := s.Call(ctx, "BAPI_XBP_JOB_ADD_ABAP_STEP", step)
+		if err != nil {
+			return fmt.Errorf("BAPI_XBP_JOB_ADD_ABAP_STEP: %w", err)
+		}
+		if err := bapiError("BAPI_XBP_JOB_ADD_ABAP_STEP", added.Get("RETURN")); err != nil {
+			return err
+		}
+
+		server, err := applicationServer(ctx, s)
+		if err != nil {
+			return err
+		}
+		start, err := s.Call(ctx, "BAPI_XBP_JOB_START_ASAP", rfc.Params{
+			"JOBNAME": jobName, "JOBCOUNT": run.JobCount,
+			"EXTERNAL_USER_NAME": xbpUser, "TARGET_SERVER": server,
+		})
+		if err != nil {
+			return fmt.Errorf("BAPI_XBP_JOB_START_ASAP: %w", err)
+		}
+		if err := bapiError("BAPI_XBP_JOB_START_ASAP", start.Get("RETURN")); err != nil {
+			return err
+		}
+		run.Started = true
+		return nil
 	})
 	if err != nil {
-		return run, fmt.Errorf("BAPI_XBP_JOB_START_ASAP: %w", err)
-	}
-	if err := bapiError("BAPI_XBP_JOB_START_ASAP", start.Get("RETURN")); err != nil {
+		if run.JobCount == "" {
+			return nil, err
+		}
 		return run, err
 	}
-	started = true
 
 	if wait <= 0 {
 		return run, nil
@@ -198,7 +210,7 @@ func abapStep(jobName, jobCount, report, variant string, params []ReportParam) r
 }
 
 // deleteJob removes a job through XBP. It runs inside the caller's XMI session.
-func deleteJob(ctx context.Context, c *rfc.Client, jobName, jobCount string) error {
+func deleteJob(ctx context.Context, c caller, jobName, jobCount string) error {
 	res, err := c.Call(ctx, "BAPI_XBP_JOB_DELETE", rfc.Params{
 		"JOBNAME": jobName, "JOBCOUNT": jobCount, "EXTERNAL_USER_NAME": xbpUser,
 	})
@@ -210,18 +222,16 @@ func deleteJob(ctx context.Context, c *rfc.Client, jobName, jobCount string) err
 
 // DeleteJob removes a job that has not started, or has ended.
 func DeleteJob(ctx context.Context, c *rfc.Client, jobName, jobCount string) error {
-	if err := xmiLogon(ctx, c); err != nil {
-		return err
-	}
-	defer func() { _, _ = c.Call(ctx, "BAPI_XMI_LOGOFF", rfc.Params{"INTERFACE": "XBP"}) }()
-	return deleteJob(ctx, c, jobName, jobCount)
+	return withXMI(ctx, c, func(s caller) error {
+		return deleteJob(ctx, s, jobName, jobCount)
+	})
 }
 
 // xbpUser is the external scheduler identity XBP records against the job.
 const xbpUser = "vsp"
 
 // xmiLogon opens the XMI session the XBP BAPIs require.
-func xmiLogon(ctx context.Context, c *rfc.Client) error {
+func xmiLogon(ctx context.Context, c caller) error {
 	res, err := c.Call(ctx, "BAPI_XMI_LOGON", rfc.Params{
 		"EXTCOMPANY": "vsp", "EXTPRODUCT": "vibing-steampunk", "INTERFACE": "XBP", "VERSION": "3.0",
 	})
@@ -231,9 +241,50 @@ func xmiLogon(ctx context.Context, c *rfc.Client) error {
 	return bapiError("BAPI_XMI_LOGON", res.Get("RETURN"))
 }
 
+// caller is what the XBP helpers call through: a pooled *rfc.Client, or the
+// *rfc.Session an XMI conversation is pinned to.
+type caller interface {
+	Call(ctx context.Context, functionName string, in rfc.Params) (rfc.Result, error)
+}
+
+// withXMI runs fn inside one XMI session on one pinned connection: logon, the
+// calls, logoff. The XBP BAPIs need the session BAPI_XMI_LOGON opened, and
+// Client.Call takes any pooled connection, so consecutive calls through it
+// can run in different SAP sessions.
+func withXMI(ctx context.Context, c *rfc.Client, fn func(s caller) error) error {
+	s, err := c.Pin(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	if err := xmiLogon(ctx, s); err != nil {
+		return err
+	}
+	defer func() {
+		cctx, cancel := cleanupContext(ctx)
+		defer cancel()
+		_, _ = s.Call(cctx, "BAPI_XMI_LOGOFF", rfc.Params{"INTERFACE": "XBP"})
+	}()
+	return fn(s)
+}
+
+// cleanupTimeout bounds compensation that must run after the caller gave up.
+const cleanupTimeout = 30 * time.Second
+
+// cleanupContext is for compensation -- deleting a job that never started,
+// logging off -- that has to happen even when ctx was cancelled.
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+}
+
+// sqlLiteral escapes a value for a quoted RFC_READ_TABLE WHERE literal.
+func sqlLiteral(v string) string {
+	return strings.ReplaceAll(v, "'", "''")
+}
+
 // applicationServer returns this instance's name, which XBP wants as the job's
 // target server. RFC_SYSTEM_INFO reports it as RFCDEST (host_SID_nn).
-func applicationServer(ctx context.Context, c *rfc.Client) (string, error) {
+func applicationServer(ctx context.Context, c caller) (string, error) {
 	info, err := c.Call(ctx, "RFC_SYSTEM_INFO", nil)
 	if err != nil {
 		return "", fmt.Errorf("resolving the target server: %w", err)
@@ -287,7 +338,7 @@ func JobStatus(ctx context.Context, c *rfc.Client, jobName, jobCount string) (st
 
 // jobStatus reads one job's TBTCO status.
 func jobStatus(ctx context.Context, c *rfc.Client, jobName, jobCount string) (string, error) {
-	where := fmt.Sprintf("JOBNAME = '%s' AND JOBCOUNT = '%s'", jobName, jobCount)
+	where := fmt.Sprintf("JOBNAME = '%s' AND JOBCOUNT = '%s'", sqlLiteral(jobName), sqlLiteral(jobCount))
 	rows, err := ReadTable(ctx, c, "TBTCO", where, []string{"STATUS"}, 1)
 	if err != nil {
 		return "", fmt.Errorf("reading job status: %w", err)
@@ -311,17 +362,20 @@ func ReadSpool(ctx context.Context, c *rfc.Client, jobName, jobCount string) (st
 
 // ReadSpoolStep reads the spool list of one step of a job.
 func ReadSpoolStep(ctx context.Context, c *rfc.Client, jobName, jobCount string, step int) (string, error) {
-	if err := xmiLogon(ctx, c); err != nil {
-		return "", err
-	}
-	defer func() { _, _ = c.Call(ctx, "BAPI_XMI_LOGOFF", rfc.Params{"INTERFACE": "XBP"}) }()
-
-	res, err := c.Call(ctx, "BAPI_XBP_JOB_SPOOLLIST_READ", rfc.Params{
-		"JOBNAME": jobName, "JOBCOUNT": jobCount, "EXTERNAL_USER_NAME": xbpUser,
-		"STEP_NUMBER": step, // XBP requires it
+	var res rfc.Result
+	err := withXMI(ctx, c, func(s caller) error {
+		var err error
+		res, err = s.Call(ctx, "BAPI_XBP_JOB_SPOOLLIST_READ", rfc.Params{
+			"JOBNAME": jobName, "JOBCOUNT": jobCount, "EXTERNAL_USER_NAME": xbpUser,
+			"STEP_NUMBER": step, // XBP requires it
+		})
+		if err != nil {
+			return fmt.Errorf("BAPI_XBP_JOB_SPOOLLIST_READ: %w", err)
+		}
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("BAPI_XBP_JOB_SPOOLLIST_READ: %w", err)
+		return "", err
 	}
 	var b strings.Builder
 	for _, row := range res.Table("SPOOL_LIST") {

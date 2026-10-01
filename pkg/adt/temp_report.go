@@ -124,7 +124,9 @@ func (c *Client) runTempReport(ctx context.Context, prefix string, source func(p
 		return out, fmt.Errorf("locking the temporary report %s: %w", prog, err)
 	}
 	if err := c.UpdateSource(ctx, objectURL+"/source/main", source(prog), lock.LockHandle, ""); err != nil {
-		_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		if uerr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); uerr != nil {
+			out.Warnings = append(out.Warnings, strandedLockAdvice(objectURL, uerr))
+		}
 		return out, fmt.Errorf("writing the temporary report %s: %w", prog, err)
 	}
 	if err := c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
@@ -161,15 +163,29 @@ func (c *Client) deleteTempReport(ctx context.Context, prog string) error {
 	if err != nil {
 		return err
 	}
-	return c.DeleteObject(ctx, objectURL, lock.LockHandle, "")
+	if err := c.DeleteObject(ctx, objectURL, lock.LockHandle, ""); err != nil {
+		if uerr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); uerr != nil {
+			return fmt.Errorf("%w; %s", err, strandedLockAdvice(objectURL, uerr))
+		}
+		return err
+	}
+	return nil
 }
 
 // sweepTempReports deletes the caller's temporary reports in $TMP that are
 // older than tempReportMaxAge -- left behind by a run that never got to its
-// own cleanup. It is best effort: what cannot be read or deleted is named in
-// the warnings it returns and left for the next run.
+// own cleanup -- unless a job that has not ended still runs one of them. It is
+// best effort: what cannot be read or deleted is named in the warnings it
+// returns and left for the next run.
+//
+// The caller is whoever authored the report this run just created. The
+// configured user would not do: cookie and SSO logons leave it empty.
 func (c *Client) sweepTempReports(ctx context.Context, run BackgroundRunner, current string) []string {
-	user := strings.ToUpper(strings.TrimSpace(c.config.Username))
+	own, err := run.ReadTable(ctx, "TADIR", fmt.Sprintf("PGMID = 'R3TR' AND OBJECT = 'PROG' AND OBJ_NAME = '%s'", current), []string{"AUTHOR"}, 1)
+	if err != nil || len(own) == 0 {
+		return []string{fmt.Sprintf("looking for temporary reports left behind failed: cannot read the author of %s (%v)", current, err)}
+	}
+	user := strings.TrimSpace(own[0]["AUTHOR"])
 	if user == "" {
 		return nil
 	}
@@ -181,6 +197,14 @@ func (c *Client) sweepTempReports(ctx context.Context, run BackgroundRunner, cur
 	}
 	var warnings []string
 	for _, row := range staleTempReports(rows, current, time.Now()) {
+		busy, err := reportInUse(ctx, run, row)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("kept the temporary report %s: cannot tell whether a job still runs it (%v)", row, err))
+			continue
+		}
+		if busy {
+			continue
+		}
 		if err := c.deleteTempReport(ctx, row); err != nil {
 			warnings = append(warnings, fmt.Sprintf("the temporary report %s, left behind by an earlier run, could not be deleted: %v", row, err))
 			continue
@@ -188,6 +212,31 @@ func (c *Client) sweepTempReports(ctx context.Context, run BackgroundRunner, cur
 		warnings = append(warnings, fmt.Sprintf("deleted the temporary report %s, left behind by an earlier run", row))
 	}
 	return warnings
+}
+
+// reportInUse says whether a job that has not ended has a step running prog.
+// A job can wait in the queue longer than tempReportMaxAge.
+func reportInUse(ctx context.Context, run BackgroundRunner, prog string) (bool, error) {
+	steps, err := run.ReadTable(ctx, "TBTCP", fmt.Sprintf("PROGNAME = '%s'", prog), []string{"JOBNAME", "JOBCOUNT"}, 0)
+	if err != nil {
+		return false, err
+	}
+	for _, st := range steps {
+		where := fmt.Sprintf("JOBNAME = '%s' AND JOBCOUNT = '%s'",
+			strings.ReplaceAll(strings.TrimSpace(st["JOBNAME"]), "'", "''"), strings.TrimSpace(st["JOBCOUNT"]))
+		jobs, err := run.ReadTable(ctx, "TBTCO", where, []string{"STATUS"}, 1)
+		if err != nil {
+			return false, err
+		}
+		// P scheduled, S released, Y ready, R running: not ended.
+		if len(jobs) == 0 {
+			continue
+		}
+		if status := strings.TrimSpace(jobs[0]["STATUS"]); status != "" && strings.Contains("PSYR", status) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // staleTempReports picks from TADIR rows the temporary reports older than
