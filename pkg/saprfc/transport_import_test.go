@@ -30,10 +30,17 @@ type fakeSystem struct {
 	calls      []string
 	imported   bool
 	importArgs rfc.Params
+	// importErr, when set, ends the import call after TMS took the import:
+	// TPALOG gains its rows, the caller gets the error.
+	importErr error
 }
 
-func (s *fakeSystem) call(_ context.Context, fm string, in rfc.Params) (exports, error) {
+func (s *fakeSystem) call(ctx context.Context, fm string, in rfc.Params) (exports, error) {
 	s.calls = append(s.calls, fm)
+	// As a real connection does, a call under a dead context gets nowhere.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	switch fm {
 	case "RFC_SYSTEM_INFO":
 		return fakeExports{scalars: map[string]any{"RFCSI_EXPORT": map[string]any{"RFCSYSID": s.sid}}}, nil
@@ -54,6 +61,9 @@ func (s *fakeSystem) call(_ context.Context, fm string, in rfc.Params) (exports,
 	case "CTS_API_IMPORT_CHANGE_REQUEST":
 		s.imported = true
 		s.importArgs = in
+		if s.importErr != nil {
+			return nil, s.importErr
+		}
 		var reqs []map[string]any
 		for _, r := range in["REQUESTS"].([]map[string]any) {
 			reqs = append(reqs, map[string]any{"REQUEST": r["REQUEST"], "RETCODE": s.perRequest})
@@ -80,7 +90,7 @@ func TestImportRequests_ImportsIntoTheConnectedSystemAndReportsTheNewSteps(t *te
 		importRC: "000", importMsg: "Request TR-EXAMPLE imported into system QAS client 100", perRequest: "000",
 	}
 
-	res, err := importRequests(context.Background(), sys.call, []string{"tr-example"}, "100")
+	res, err := importRequests(context.Background(), sys.call, []string{"tr-example"}, "100", nil)
 	if err != nil {
 		t.Fatalf("importRequests: %v", err)
 	}
@@ -108,7 +118,7 @@ func TestImportRequests_ImportsIntoTheConnectedSystemAndReportsTheNewSteps(t *te
 func TestImportRequests_AFailedImportIsAnErrorWithTheSystemsMessage(t *testing.T) {
 	sys := &fakeSystem{sid: "QAS", importRC: "012", importMsg: "Could not start import", perRequest: ""}
 
-	res, err := importRequests(context.Background(), sys.call, []string{"TR-EXAMPLE"}, "100")
+	res, err := importRequests(context.Background(), sys.call, []string{"TR-EXAMPLE"}, "100", nil)
 	if err == nil {
 		t.Fatal("a failed import was reported as success")
 	}
@@ -133,7 +143,7 @@ func TestImportRequests_RefusesBeforeCalling(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sys := &fakeSystem{sid: "QAS", importRC: "000"}
-			if _, err := importRequests(context.Background(), sys.call, tc.requests, tc.client); err == nil {
+			if _, err := importRequests(context.Background(), sys.call, tc.requests, tc.client, nil); err == nil {
 				t.Fatal("accepted")
 			}
 			if len(sys.calls) != 0 {
@@ -206,5 +216,160 @@ func TestImportLogs_ManyRequestsFitTheOptionsLines(t *testing.T) {
 	}
 	if len(options) < 2 {
 		t.Errorf("OPTIONS = %v, want the list split over several lines", options)
+	}
+}
+
+// reopenOn gives a fresh connection to sys, counting how often it was asked.
+func reopenOn(sys *fakeSystem, opened *int) reopenFn {
+	return func(context.Context) (callFn, func(), error) {
+		*opened++
+		return sys.call, func() {}, nil
+	}
+}
+
+// checkOutcomeUnknown asserts the shape every lost import shares: an
+// *ImportOutcomeUnknownError that keeps its cause, a result marked unknown
+// that names the requests and says to check TPALOG/STMS, and no word of a
+// failure to retry.
+func checkOutcomeUnknown(t *testing.T, res *ImportResult, err error, cause error, reqs ...string) *ImportOutcomeUnknownError {
+	t.Helper()
+	var unknown *ImportOutcomeUnknownError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("err = %v (%T), want an *ImportOutcomeUnknownError", err, err)
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("err %v does not wrap the cause %v", err, cause)
+	}
+	if res == nil {
+		t.Fatal("no result: the caller cannot tell the import may be running")
+	}
+	if res.Outcome != OutcomeUnknown || res.Imported {
+		t.Errorf("outcome = %q imported = %v, want unknown and not imported", res.Outcome, res.Imported)
+	}
+	if res.System != "PRD" || res.Client != "100" || res.Submitted == "" {
+		t.Errorf("result = %+v, want the system, client and submission time", res)
+	}
+	if len(res.Requests) != len(reqs) {
+		t.Fatalf("requests = %+v, want %v", res.Requests, reqs)
+	}
+	for i, r := range reqs {
+		if res.Requests[i].Request != r {
+			t.Errorf("request %d = %q, want %q", i, res.Requests[i].Request, r)
+		}
+		if !strings.Contains(err.Error(), r) || !strings.Contains(res.Advice, r) {
+			t.Errorf("%s missing from the error or the advice: %v / %s", r, err, res.Advice)
+		}
+	}
+	for _, text := range []string{err.Error(), res.Advice} {
+		if !strings.Contains(text, "TPALOG") || !strings.Contains(text, "STMS") {
+			t.Errorf("does not point at TPALOG and STMS: %s", text)
+		}
+		lower := strings.ToLower(text)
+		if strings.Contains(lower, "retry") || strings.Contains(lower, "failed") {
+			t.Errorf("reads as a failure to retry: %s", text)
+		}
+	}
+	return unknown
+}
+
+// The import call times out after TMS took the import: the outcome is
+// unknown, not a failure, and the result says what was submitted.
+func TestImportRequests_ACallLostAfterSubmissionIsAnUnknownOutcome(t *testing.T) {
+	for name, cause := range map[string]error{
+		"timeout":          context.DeadlineExceeded,
+		"connection drop":  errors.New("read tcp 10.0.0.1:3300: connection reset by peer"),
+		"context canceled": context.Canceled,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sys := &fakeSystem{sid: "PRD", importErr: cause}
+			res, err := importRequests(context.Background(), sys.call, []string{"TR-A", "tr-b"}, "100", nil)
+			u := checkOutcomeUnknown(t, res, err, cause, "TR-A", "TR-B")
+			if res.Started != nil || u.Started != nil {
+				t.Errorf("started = %v, want unknown without a recheck", res.Started)
+			}
+		})
+	}
+}
+
+// With a way to log on again, TPALOG is read on a fresh connection -- even
+// when the call's own context is the one that ran out -- and shows the steps
+// this import added.
+func TestImportRequests_ALostCallRechecksTPALOGOnAFreshConnection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sys := &fakeSystem{
+		sid:       "PRD",
+		logBefore: []string{"TR-A|100|I|0000|20260101100000"},
+		logAfter: []string{
+			"TR-A|100|I|0000|20260101100000",
+			"TR-A|ALL|L|0000|20260102100000",
+			"TR-A|100|I|0004|20260102100005",
+		},
+	}
+	// The caller gives up while tp runs: the call's context is cancelled.
+	sys.importErr = context.Canceled
+	call := func(c context.Context, fm string, in rfc.Params) (exports, error) {
+		out, err := sys.call(c, fm, in)
+		if fm == "CTS_API_IMPORT_CHANGE_REQUEST" {
+			cancel()
+		}
+		return out, err
+	}
+	opened := 0
+	res, err := importRequests(ctx, call, []string{"TR-A"}, "100", reopenOn(sys, &opened))
+	u := checkOutcomeUnknown(t, res, err, context.Canceled, "TR-A")
+	if opened != 1 {
+		t.Errorf("reopened %d times, want 1", opened)
+	}
+	if res.Started == nil || !*res.Started || u.Started == nil || !*u.Started {
+		t.Fatalf("started = %v, want true: TPALOG holds new steps", res.Started)
+	}
+	if got := res.Requests[0]; len(got.Steps) != 2 || got.MaxRC != "0004" {
+		t.Errorf("TR-A = %+v, want this import's two steps and rc 0004", got)
+	}
+	if !strings.Contains(err.Error(), "has started") {
+		t.Errorf("error does not say the import started: %v", err)
+	}
+}
+
+// A recheck that finds nothing new still does not call it a failure: TMS
+// may not have handed the request to tp yet.
+func TestImportRequests_ARecheckWithoutNewStepsStaysUnknown(t *testing.T) {
+	sys := &fakeSystem{sid: "PRD", importErr: context.DeadlineExceeded,
+		logBefore: []string{"TR-A|100|I|0000|20260101100000"},
+		logAfter:  []string{"TR-A|100|I|0000|20260101100000"},
+	}
+	opened := 0
+	res, err := importRequests(context.Background(), sys.call, []string{"TR-A"}, "100", reopenOn(sys, &opened))
+	checkOutcomeUnknown(t, res, err, context.DeadlineExceeded, "TR-A")
+	if res.Started == nil || *res.Started {
+		t.Errorf("started = %v, want false", res.Started)
+	}
+	if len(res.Requests[0].Steps) != 0 {
+		t.Errorf("steps = %+v, want none", res.Requests[0].Steps)
+	}
+}
+
+// A recheck that cannot log on leaves the outcome unknown and says so.
+func TestImportRequests_ARecheckThatCannotLogOnStaysUnknown(t *testing.T) {
+	sys := &fakeSystem{sid: "PRD", importErr: context.DeadlineExceeded}
+	reopen := func(context.Context) (callFn, func(), error) { return nil, nil, errors.New("gateway unreachable") }
+	res, err := importRequests(context.Background(), sys.call, []string{"TR-A"}, "100", reopen)
+	checkOutcomeUnknown(t, res, err, context.DeadlineExceeded, "TR-A")
+	if res.Started != nil {
+		t.Errorf("started = %v, want nil: TPALOG was not read", *res.Started)
+	}
+	if !strings.Contains(err.Error(), "could not be read again") {
+		t.Errorf("error does not say TPALOG was not read: %v", err)
+	}
+}
+
+// An error before the import call is not an unknown outcome: nothing was
+// submitted.
+func TestImportRequests_AnErrorBeforeSubmissionIsNotUnknown(t *testing.T) {
+	call := func(context.Context, string, rfc.Params) (exports, error) { return nil, context.DeadlineExceeded }
+	_, err := importRequests(context.Background(), call, []string{"TR-A"}, "100", nil)
+	var unknown *ImportOutcomeUnknownError
+	if err == nil || errors.As(err, &unknown) {
+		t.Errorf("err = %v, want a plain error: the import was never submitted", err)
 	}
 }

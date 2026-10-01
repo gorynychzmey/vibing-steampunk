@@ -28,7 +28,12 @@ then read_only and transport_read_only refuse it, and allowed_transports
 limits which requests it takes.
 
   vsp -s qas transport import TR-A
-  vsp -s qas transport import TR-A TR-B --json`,
+  vsp -s qas transport import TR-A TR-B --json
+
+If the call ends without an answer after the import was submitted (a
+timeout, a dropped connection), the outcome is unknown: the import may be
+running. vsp reads TPALOG again on a fresh logon and reports what it shows;
+do not import the requests again before TPALOG or STMS says they did not run.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		params, err := resolveSystemParams(cmd)
@@ -45,8 +50,8 @@ limits which requests it takes.
 		}
 		asJSON, _ := cmd.Flags().GetBool("json")
 		timeout, _ := cmd.Flags().GetDuration("timeout")
-		return withRFCTimeout(cmd, timeout, func(ctx context.Context, c *rfc.Client) error {
-			res, ierr := saprfc.ImportRequests(ctx, c, args, client)
+		return withRFCDestTimeout(cmd, timeout, func(ctx context.Context, c *rfc.Client, dest saprfc.Params) error {
+			res, ierr := saprfc.ImportRequestsRecheck(ctx, c, dest, args, client)
 			if asJSON && res != nil {
 				if perr := printJSON(res); perr != nil {
 					return perr
@@ -57,6 +62,9 @@ limits which requests it takes.
 						r.Request, res.System, res.Client, r.RetCode, len(r.Steps), r.MaxRC)
 				}
 				fmt.Fprintln(os.Stderr, res.Message)
+				if res.Advice != "" {
+					fmt.Fprintln(os.Stderr, res.Advice)
+				}
 			}
 			return ierr
 		})

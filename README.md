@@ -463,7 +463,11 @@ vsp -s qas transport import TR-A TR-B --json
 MCP: `system` with `import_transport` (`transport`). It always goes to the
 server's own system and client: per-call `host`, `sysnr`, `port`, `user` and a
 `client` other than the server's own are refused, and the gateway comes from
-the system's `.vsp.json` entry.
+the system's `.vsp.json` entry. If the call ends without an answer after the
+import was submitted (a timeout, a dropped connection), the outcome is
+`unknown`, not failed: the import may be running. vsp reads TPALOG again on a
+fresh logon and reports whether it started; check `import_status` or STMS
+before importing the requests again.
 
 `vsp update` fetches the latest release for this platform, compares it with
 the running version, verifies the download against the release's

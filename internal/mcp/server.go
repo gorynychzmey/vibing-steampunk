@@ -26,7 +26,7 @@ import (
 type AsyncTask struct {
 	ID        string      `json:"id"`
 	Type      string      `json:"type"`   // "report", "export", etc.
-	Status    string      `json:"status"` // "running", "completed", "error"
+	Status    string      `json:"status"` // "running", "completed", "error"; an import also "unknown" (see saprfc.OutcomeUnknown)
 	StartedAt time.Time   `json:"started_at"`
 	EndedAt   *time.Time  `json:"ended_at,omitempty"`
 	Result    interface{} `json:"result,omitempty"`

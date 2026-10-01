@@ -66,7 +66,8 @@ func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallTool
 			return nil, fmt.Errorf("RFC logon to %s:%d failed: %w", dest.Host, dest.Port, oerr)
 		}
 		defer func() { _ = c.Close(context.Background()) }()
-		return saprfc.ImportRequests(ctx, c, requests, client)
+		// After a lost call it logs on again to read TPALOG.
+		return saprfc.ImportRequestsRecheck(ctx, c, dest, requests, client)
 	}
 
 	if async, _ := getBoolParam(args, "async"); async {
@@ -74,13 +75,26 @@ func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallTool
 	}
 	res, err := run(ctx)
 	if err != nil {
-		// The partial result stays, but the call is an error: a non-000 TMS
-		// code must not read as a successful tool call.
-		out := newToolResultJSON(map[string]any{"error": err.Error(), "result": res})
-		out.IsError = true
-		return out, nil
+		return importErrorResult(requests, res, err), nil
 	}
 	return newToolResultJSON(res), nil
+}
+
+// importErrorResult is the tool result of an import that did not succeed.
+// The partial result stays, but the call is an error: a non-000 TMS code
+// must not read as a successful tool call. An import submitted and then lost
+// is marked unknown, with how to find out what happened, so it is not taken
+// for a failure to retry.
+func importErrorResult(requests []string, res *saprfc.ImportResult, err error) *mcp.CallToolResult {
+	body := map[string]any{"error": err.Error(), "result": res}
+	if res != nil && res.Outcome == saprfc.OutcomeUnknown {
+		body["outcome"] = saprfc.OutcomeUnknown
+		body["advice"] = res.Advice
+		body["check"] = importStatusCall(requests, res.Submitted)
+	}
+	out := newToolResultJSON(body)
+	out.IsError = true
+	return out
 }
 
 // importClient is the client an import goes into: this server's own. A
@@ -99,6 +113,12 @@ func importClient(perCall, own string) (string, error) {
 	return "", fmt.Errorf("import_transport client %q is blocked: it differs from this server's own client %s, "+
 		"and the import's opt-in and safety settings belong to that client (configure the other client as "+
 		"its own system in .vsp.json and use a server connected to it)", perCall, own)
+}
+
+// importStatusCall is the call that follows an import in TPALOG.
+func importStatusCall(requests []string, since string) string {
+	return fmt.Sprintf(`SAP(action="system", params={"type": "import_status", "transport": %q, "since": %q})`,
+		strings.Join(requests, ","), since)
 }
 
 // importDestinationOverrides are the rfcDestination parameters that would
@@ -128,6 +148,10 @@ func (s *Server) startImport(run func(context.Context) (*saprfc.ImportResult, er
 		task.Result = res
 		if err != nil {
 			task.Status = "error"
+			if res != nil && res.Outcome == saprfc.OutcomeUnknown {
+				// Not an error to retry: the import may be running.
+				task.Status = saprfc.OutcomeUnknown
+			}
 			task.Error = err.Error()
 			return
 		}
@@ -141,8 +165,7 @@ func (s *Server) startImport(run func(context.Context) (*saprfc.ImportResult, er
 		"client":   client,
 		"since":    started.Format("20060102150405"),
 		"follow":   fmt.Sprintf(`SAP(action="debug", target="GET_ASYNC_RESULT", params={"task_id": %q, "wait_seconds": 600})`, taskID),
-		"log": fmt.Sprintf(`SAP(action="system", params={"type": "import_status", "transport": %q, "since": %q})`,
-			strings.Join(requests, ","), started.Format("20060102150405")),
+		"log":      importStatusCall(requests, started.Format("20060102150405")),
 	}
 }
 

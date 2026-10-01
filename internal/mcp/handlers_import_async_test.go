@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,5 +72,26 @@ func TestStartImport_AFailedImportIsAnErrorOnTheTask(t *testing.T) {
 	task := asyncResult(t, s, map[string]any{"task_id": id, "wait_seconds": 5.0})
 	if task.Status != "error" || task.Error == "" {
 		t.Errorf("task = %+v, want status error with the message", task)
+	}
+}
+
+// An import whose call was lost after submission is not an error to retry:
+// the task says unknown, with the result that names the requests.
+func TestStartImport_ALostImportIsUnknownOnTheTask(t *testing.T) {
+	s := &Server{asyncTasks: map[string]*AsyncTask{}}
+	run := func(context.Context) (*saprfc.ImportResult, error) {
+		return &saprfc.ImportResult{System: "PRD", Client: "100", Outcome: saprfc.OutcomeUnknown,
+				Requests: []saprfc.ImportedRequest{{Request: "TR-EXAMPLE"}}},
+			&saprfc.ImportOutcomeUnknownError{System: "PRD", Client: "100", Requests: []string{"TR-EXAMPLE"},
+				Cause: context.DeadlineExceeded}
+	}
+	id := s.startImport(run, []string{"TR-EXAMPLE"}, "100", time.Minute)["task_id"].(string)
+	task := asyncResult(t, s, map[string]any{"task_id": id, "wait_seconds": 5.0})
+	if task.Status != saprfc.OutcomeUnknown || task.Error == "" {
+		t.Errorf("task = %+v, want status unknown with the message", task)
+	}
+	res, _ := json.Marshal(task.Result)
+	if !strings.Contains(string(res), "TR-EXAMPLE") || !strings.Contains(string(res), `"outcome":"unknown"`) {
+		t.Errorf("task result = %s, want the request and outcome unknown", res)
 	}
 }

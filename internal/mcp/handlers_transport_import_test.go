@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
 
 // Importing is off unless the system allows it. The refusal comes before any
@@ -136,5 +138,25 @@ func TestImportClient(t *testing.T) {
 		if (err != nil) != tc.refused || got != tc.want {
 			t.Errorf("importClient(%q, %q) = %q, %v; want %q, refused=%v", tc.perCall, tc.own, got, err, tc.want, tc.refused)
 		}
+	}
+}
+
+// A lost import reaches the caller as unknown, with the requests and the
+// import_status call that follows them -- not as a plain failure.
+func TestImportErrorResult_ALostImportIsUnknown(t *testing.T) {
+	res := &saprfc.ImportResult{System: "PRD", Client: "100", Outcome: saprfc.OutcomeUnknown,
+		Submitted: "20260102100000", Advice: "do NOT submit it again yet; check TPALOG or STMS",
+		Requests: []saprfc.ImportedRequest{{Request: "TR-A"}, {Request: "TR-B"}}}
+	err := &saprfc.ImportOutcomeUnknownError{System: "PRD", Client: "100", Requests: []string{"TR-A", "TR-B"},
+		Cause: context.DeadlineExceeded}
+	out := importErrorResult([]string{"TR-A", "TR-B"}, res, err)
+	text := resultText(out)
+	for _, want := range []string{`"outcome": "unknown"`, "TR-A,TR-B", "20260102100000", "import_status", "TPALOG"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("result lacks %s: %s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "retry") {
+		t.Errorf("result reads as a failure to retry: %s", text)
 	}
 }

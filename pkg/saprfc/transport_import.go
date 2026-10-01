@@ -59,6 +59,19 @@ type ImportedRequest struct {
 	MaxRC string       `json:"maxRc,omitempty"`
 }
 
+// Outcomes of an import, as ImportResult.Outcome reports them.
+const (
+	// OutcomeImported: TMS answered 000.
+	OutcomeImported = "imported"
+	// OutcomeFailed: TMS answered with another code; its message says why.
+	OutcomeFailed = "failed"
+	// OutcomeUnknown: the import was submitted and no answer came back (a
+	// timeout, a dropped connection, a cancelled call). TMS may have started
+	// it and tp may still be running, so it must not be submitted again
+	// before TPALOG or STMS says what happened.
+	OutcomeUnknown = "unknown"
+)
+
 // ImportResult is what an import did.
 type ImportResult struct {
 	System   string            `json:"system"`
@@ -66,8 +79,51 @@ type ImportResult struct {
 	RetCode  string            `json:"retcode"`
 	Message  string            `json:"message"`
 	Imported bool              `json:"imported"`
+	Outcome  string            `json:"outcome"`
 	Requests []ImportedRequest `json:"requests"`
+	// Submitted is when the import was handed to TMS (YYYYMMDDhhmmss, local
+	// time): the since for following it in TPALOG.
+	Submitted string `json:"submitted,omitempty"`
+	// Started says, for an unknown outcome, whether TPALOG -- read again
+	// on a fresh connection -- already holds tp steps of this import. Nil
+	// when it could not be read again.
+	Started *bool `json:"started,omitempty"`
+	// Advice says what to do next when the outcome is unknown.
+	Advice string `json:"advice,omitempty"`
 }
+
+// ImportOutcomeUnknownError is the error of an import that was submitted
+// and then lost: nobody knows whether it ran. It is never a "failed, retry":
+// the requests may be in the middle of their import.
+type ImportOutcomeUnknownError struct {
+	System   string
+	Client   string
+	Requests []string
+	Started  *bool
+	Cause    error
+}
+
+func (e *ImportOutcomeUnknownError) Error() string {
+	state := "TPALOG could not be read again to see whether it started"
+	if e.Started != nil && *e.Started {
+		state = "TPALOG already holds tp steps of it, so it has started and may still be running"
+	} else if e.Started != nil {
+		state = "TPALOG holds no tp steps of it yet, which does not mean it will not run (TMS may still be queueing it)"
+	}
+	return fmt.Sprintf("import outcome UNKNOWN for %s into %s client %s: the import was submitted to TMS, then "+
+		"the call ended without an answer (%v); %s. Do not import these requests again before checking "+
+		"their tp steps in TPALOG (import_status) or the import history in STMS of %s",
+		strings.Join(e.Requests, ", "), e.System, e.Client, e.Cause, state, e.System)
+}
+
+func (e *ImportOutcomeUnknownError) Unwrap() error { return e.Cause }
+
+// reopenFn gives a fresh connection to read TPALOG again after the import
+// call was lost; done closes it.
+type reopenFn func(ctx context.Context) (call callFn, done func(), err error)
+
+// recheckTimeout bounds the TPALOG read after a lost import call.
+const recheckTimeout = 30 * time.Second
 
 var (
 	requestPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9_-]{0,19}$`)
@@ -77,11 +133,29 @@ var (
 // ImportRequests imports released requests into the connected system, in
 // client, through TMS -- as STMS_IMPORT does there -- and reports the tp steps
 // the import added.
+//
+// Once the import is submitted, an error that leaves its fate open -- a
+// timeout, a dropped connection, a cancelled context -- is an
+// *ImportOutcomeUnknownError, with a result whose Outcome is OutcomeUnknown.
 func ImportRequests(ctx context.Context, c *rfc.Client, requests []string, client string) (*ImportResult, error) {
-	return importRequests(ctx, clientCall(c), requests, client)
+	return importRequests(ctx, clientCall(c), requests, client, nil)
 }
 
-func importRequests(ctx context.Context, call callFn, requests []string, client string) (*ImportResult, error) {
+// ImportRequestsRecheck is ImportRequests that, when the import call is lost
+// after submission, logs on to dest again and reads TPALOG to say whether the
+// import has started.
+func ImportRequestsRecheck(ctx context.Context, c *rfc.Client, dest Params, requests []string, client string) (*ImportResult, error) {
+	reopen := func(ctx context.Context) (callFn, func(), error) {
+		fresh, err := Open(ctx, dest)
+		if err != nil {
+			return nil, nil, err
+		}
+		return clientCall(fresh), func() { _ = fresh.Close(context.Background()) }, nil
+	}
+	return importRequests(ctx, clientCall(c), requests, client, reopen)
+}
+
+func importRequests(ctx context.Context, call callFn, requests []string, client string, reopen reopenFn) (*ImportResult, error) {
 	var reqs []string
 	for _, r := range requests {
 		r = strings.ToUpper(strings.TrimSpace(r))
@@ -120,16 +194,21 @@ func importRequests(ctx context.Context, call callFn, requests []string, client 
 		table = append(table, map[string]any{"REQUEST": r})
 	}
 	in["REQUESTS"] = table
+	submitted := time.Now().Format("20060102150405")
 	out, err := call(ctx, "CTS_API_IMPORT_CHANGE_REQUEST", in)
 	if err != nil {
-		return nil, fmt.Errorf("CTS_API_IMPORT_CHANGE_REQUEST: %w", err)
+		// From here on the import may be running: whatever ended the call, it
+		// is not a failure to retry.
+		return importOutcomeUnknown(ctx, reopen, sid, client, reqs, before, submitted, err)
 	}
 
 	res := &ImportResult{
-		System:  sid,
-		Client:  client,
-		RetCode: strings.TrimSpace(fmt.Sprint(out.Get("RETCODE"))),
-		Message: strings.TrimSpace(fmt.Sprint(out.Get("MESSAGE"))),
+		System:    sid,
+		Client:    client,
+		RetCode:   strings.TrimSpace(fmt.Sprint(out.Get("RETCODE"))),
+		Message:   strings.TrimSpace(fmt.Sprint(out.Get("MESSAGE"))),
+		Outcome:   OutcomeFailed,
+		Submitted: submitted,
 	}
 	perRequest := map[string]string{}
 	for _, row := range out.Table("REQUESTS") {
@@ -157,10 +236,60 @@ func importRequests(ctx context.Context, call callFn, requests []string, client 
 			sid, client, res.RetCode, importRetCodeText(res.RetCode), res.Message)
 	}
 	res.Imported = true
+	res.Outcome = OutcomeImported
 	if lerr != nil {
 		return res, fmt.Errorf("imported, but reading TPALOG afterwards failed: %w", lerr)
 	}
 	return res, nil
+}
+
+// importOutcomeUnknown builds the result of an import whose call was lost
+// after submission. With reopen it reads TPALOG again on a fresh connection,
+// under a context of its own (the call's may be what ended it), and reports
+// the tp steps added since before.
+func importOutcomeUnknown(ctx context.Context, reopen reopenFn, sid, client string, reqs []string,
+	before map[string][]ImportStep, submitted string, cause error) (*ImportResult, error) {
+	res := &ImportResult{
+		System:    sid,
+		Client:    client,
+		Outcome:   OutcomeUnknown,
+		Submitted: submitted,
+		Message:   fmt.Sprintf("CTS_API_IMPORT_CHANGE_REQUEST was submitted, then the call ended without an answer: %v", cause),
+	}
+	var after map[string][]ImportStep
+	if reopen != nil {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recheckTimeout)
+		defer cancel()
+		if fresh, done, oerr := reopen(rctx); oerr == nil {
+			after, oerr = readImportLog(rctx, fresh, reqs)
+			done()
+			if oerr != nil {
+				after = nil
+			}
+		}
+	}
+	started := false
+	for _, r := range reqs {
+		ir := ImportedRequest{Request: r}
+		for _, st := range after[r] {
+			if !containsStep(before[r], st) {
+				ir.Steps = append(ir.Steps, st)
+				if st.RetCode > ir.MaxRC {
+					ir.MaxRC = st.RetCode
+				}
+			}
+		}
+		started = started || len(ir.Steps) > 0
+		res.Requests = append(res.Requests, ir)
+	}
+	if after != nil {
+		res.Started = &started
+	}
+	uerr := &ImportOutcomeUnknownError{System: sid, Client: client, Requests: reqs, Started: res.Started, Cause: cause}
+	res.Advice = fmt.Sprintf("The import may have started; do NOT submit it again yet. Check the tp steps of %s in TPALOG "+
+		"since %s (import_status), or the import history in STMS of %s, and import again only if neither shows it.",
+		strings.Join(reqs, ", "), submitted, sid)
+	return res, uerr
 }
 
 // ImportLog is what TPALOG holds for one request: its tp steps, oldest first,
