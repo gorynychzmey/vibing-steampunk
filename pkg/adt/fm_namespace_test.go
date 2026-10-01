@@ -24,7 +24,7 @@ func TestFunctionModuleInNamespacedGroup(t *testing.T) {
 func TestGroupFromFunctionURI_Namespace(t *testing.T) {
 	for uri, want := range map[string]string{
 		"/sap/bc/adt/functions/groups/%2fns%2fvsp_fg/fmodules/%2fns%2fvsp_fm": "/NS/VSP_FG",
-		"/sap/bc/adt/functions/groups/zdemo/fmodules/z_demo":                    "ZDEMO",
+		"/sap/bc/adt/functions/groups/zdemo/fmodules/z_demo":                  "ZDEMO",
 	} {
 		if got := groupFromFunctionURI(uri); got != want {
 			t.Errorf("%s: %s, want %s", uri, got, want)
