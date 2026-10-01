@@ -311,13 +311,14 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 		}
 	}
 
-	// The wrapper ends every run that reaches its end in the assertion that
-	// carries the marker, so a run without one never got there. ABAP Unit says
-	// why only in a warning: a test class above the system's risk level is
-	// "not executed", with severity "tolerable". That warning was the only
-	// report of a run that never happened, and because only failures were
-	// checked, the run used to be reported as a success.
-	if result.Failure == nil && len(testResult.Classes) > 0 && !anyExecResult(result.RawAlerts) && PayloadFailure(result.RawAlerts) == nil {
+	// A test class above the system's risk level is "not executed": ABAP Unit
+	// lists the class with no test method and says why only in a warning, with
+	// severity "tolerable". That warning was the only report of a run that
+	// never happened, and because only failures were checked, the run used to
+	// be reported as a success. A listed method did run, even when it left
+	// before the closing assertion (an early CHECK, RETURN or EXIT), so only a
+	// result with no test method at all is a run that did not happen.
+	if result.Failure == nil && len(testResult.Classes) > 0 && !anyTestMethod(testResult.Classes) && !anyExecResult(result.RawAlerts) && PayloadFailure(result.RawAlerts) == nil {
 		result.Failure = &ExecuteFailure{
 			Kind:  ExecuteFailureNotRun,
 			Title: "ABAP Unit did not run the code to its end",
@@ -424,6 +425,17 @@ func PayloadFailure(alerts []UnitTestAlert) *UnitTestAlert {
 		}
 	}
 	return fallback
+}
+
+// anyTestMethod reports whether ABAP Unit executed at least one test method.
+// A class refused for its risk level comes back with none.
+func anyTestMethod(classes []UnitTestClass) bool {
+	for _, class := range classes {
+		if len(class.TestMethods) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // anyExecResult reports whether any alert is the closing assertion, that is

@@ -337,3 +337,33 @@ func TestExecuteABAPReportsARunRefusedForItsRiskLevel(t *testing.T) {
 		t.Errorf("SAP's reason did not reach the caller: title %q, message %q", result.Failure.Title, result.Message)
 	}
 }
+
+// A payload that leaves the test method early (CHECK, RETURN, or EXIT outside a
+// loop) never reaches the closing assertion, but ABAP Unit still lists the
+// method it executed. The code ran; reporting it as not run would invite a
+// caller to run side-effecting code a second time.
+const methodWithoutAlertsRunResultXML = `<?xml version="1.0" encoding="utf-8"?>` +
+	`<aunit:runResult xmlns:aunit="http://www.sap.com/adt/aunit" xmlns:adtcore="http://www.sap.com/adt/core">` +
+	`<program adtcore:uri="/sap/bc/adt/programs/programs/ztemp_exec_1" adtcore:type="PROG/P" adtcore:name="ZTEMP_EXEC_1">` +
+	`<testClasses><testClass adtcore:uri="/sap/bc/adt/programs/programs/ztemp_exec_1#type=PROG%2FPLL;name=LTC_EXECUTOR" adtcore:type="PROG/OLL" adtcore:name="LTC_EXECUTOR" durationCategory="short" riskLevel="dangerous">` +
+	`<testMethods><testMethod adtcore:name="EXECUTE_PAYLOAD" executionTime="0.01"/></testMethods>` +
+	`</testClass></testClasses></program></aunit:runResult>`
+
+func TestExecuteABAPAnEarlyReturnIsARun(t *testing.T) {
+	srv := &executeServer{
+		activation: func(string) (int, string) { return http.StatusOK, "" },
+		runResult:  func(string) (int, string) { return http.StatusOK, methodWithoutAlertsRunResultXML },
+	}
+	client := srv.start(t)
+
+	result, err := client.ExecuteABAP(context.Background(), "CHECK 1 = 2.", &ExecuteABAPOptions{RiskLevel: "dangerous"})
+	if err != nil {
+		t.Fatalf("ExecuteABAP: %v", err)
+	}
+	if result.Failure != nil && result.Failure.Kind == ExecuteFailureNotRun {
+		t.Fatalf("a test method that ran was reported as not run: %q", result.Message)
+	}
+	if !result.Success {
+		t.Fatalf("a run that left early without a failure was not a success: %+v", result.Failure)
+	}
+}
