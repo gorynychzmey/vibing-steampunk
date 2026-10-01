@@ -18,6 +18,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	openrfc "github.com/oisee/open-rfc-go/rfc"
 
+	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/config"
 	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
@@ -62,6 +63,15 @@ func (s *Server) routeRFCAction(ctx context.Context, action, objectType, objectN
 	if name == "" {
 		if key := rfcNameKey(op); key != "" {
 			name = strings.TrimSpace(getStringParam(params, key))
+		}
+	}
+
+	// run starts a background job that does whatever the report does, so it
+	// passes the safety configuration first, as ExecuteABAP does (OpWorkflow):
+	// --read-only and --disallowed-ops W refuse it before any connection.
+	if op == "run" {
+		if err := s.adtClient.Safety().CheckOperation(adt.OpWorkflow, "RunReport"); err != nil {
+			return nil, true, err
 		}
 	}
 
