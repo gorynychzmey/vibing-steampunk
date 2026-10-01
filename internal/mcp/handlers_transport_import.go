@@ -17,17 +17,19 @@ import (
 // It goes over classic RFC to CTS_API_IMPORT_CHANGE_REQUEST in that system; the
 // target is always this server's own system (see saprfc.ImportRequests).
 func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if !s.adtClient.Safety().AllowTransportImport {
-		return newToolResultError("importing requests is off for this system; enable it with allow_transport_import " +
-			"in .vsp.json, --allow-transport-import or SAP_ALLOW_TRANSPORT_IMPORT=true"), nil
-	}
 	args := request.GetArguments()
 	requests := transportList(args["transport"])
 	if len(requests) == 0 {
 		requests = transportList(args["transports"])
 	}
-	if len(requests) == 0 {
+	safety := s.adtClient.Safety()
+	if len(requests) == 0 && safety.AllowTransportImport {
 		return newToolResultError("transport (one request, a comma-separated list or an array) is required"), nil
+	}
+	// The import's own opt-in, then read-only, transport read-only and the
+	// allowed transports: an import changes the system, so it fails closed.
+	if err := safety.CheckTransportImport(requests); err != nil {
+		return newToolResultError(err.Error()), nil
 	}
 	client := getStringParam(args, "client")
 	if client == "" {

@@ -1,6 +1,7 @@
 package adt
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -408,5 +409,36 @@ func TestSafetyConfig_CheckTransportableEdit_ErrorMessage(t *testing.T) {
 	}
 	if !contains(errMsg, "SAP_ALLOW_TRANSPORTABLE_EDITS") {
 		t.Error("Error message should mention environment variable")
+	}
+}
+
+// An import has its own opt-in, and every switch that limits changes still
+// refuses it: it changes the system, so it fails closed.
+func TestSafetyConfig_CheckTransportImport(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cfg      SafetyConfig
+		requests []string
+		wantErr  string
+	}{
+		{"off by default", SafetyConfig{}, []string{"A4HK900001"}, "allow_transport_import"},
+		{"allowed", SafetyConfig{AllowTransportImport: true}, []string{"A4HK900001"}, ""},
+		{"read-only", SafetyConfig{AllowTransportImport: true, ReadOnly: true}, []string{"A4HK900001"}, "read-only"},
+		{"transport read-only", SafetyConfig{AllowTransportImport: true, TransportReadOnly: true}, []string{"A4HK900001"}, "transport read-only"},
+		{"in allowed transports", SafetyConfig{AllowTransportImport: true, AllowedTransports: []string{"A4HK*"}}, []string{"a4hk900001"}, ""},
+		{"one outside allowed transports", SafetyConfig{AllowTransportImport: true, AllowedTransports: []string{"A4HK*"}}, []string{"A4HK900001", "DEVK900002"}, "DEVK900002"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.CheckTransportImport(tc.requests)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want allowed, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want an error naming %q, got %v", tc.wantErr, err)
+			}
+		})
 	}
 }

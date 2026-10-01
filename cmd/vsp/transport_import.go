@@ -8,6 +8,7 @@ import (
 	"github.com/oisee/open-rfc-go/rfc"
 	"github.com/spf13/cobra"
 
+	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
 
@@ -21,8 +22,9 @@ domain controller TMS would need the target's TMSSUP logon, which a remote
 call cannot give, so the target is always the connected system.
 
 The import changes the system, so it is off unless the system allows it:
-allow_transport_import in .vsp.json or SAP_ALLOW_TRANSPORT_IMPORT=true,
-independently of read_only.
+allow_transport_import in .vsp.json or SAP_ALLOW_TRANSPORT_IMPORT=true. Even
+then read_only and transport_read_only refuse it, and allowed_transports
+limits which requests it takes.
 
   vsp -s qas transport import TR-A
   vsp -s qas transport import TR-A TR-B --client 200 --json`,
@@ -32,8 +34,8 @@ independently of read_only.
 		if err != nil {
 			return err
 		}
-		if !params.AllowTransportImport {
-			return fmt.Errorf("importing requests is off for this system; set allow_transport_import in .vsp.json or SAP_ALLOW_TRANSPORT_IMPORT=true")
+		if err := checkImportAllowed(params, args); err != nil {
+			return err
 		}
 		client, _ := cmd.Flags().GetString("client")
 		if client == "" {
@@ -57,6 +59,18 @@ independently of read_only.
 			return ierr
 		})
 	},
+}
+
+// checkImportAllowed applies the system's safety settings to an import: its
+// own opt-in, then read-only, transport read-only and the allowed transports.
+func checkImportAllowed(params *systemParams, requests []string) error {
+	safety := adt.SafetyConfig{
+		ReadOnly:             params.ReadOnly,
+		TransportReadOnly:    params.TransportReadOnly,
+		AllowedTransports:    params.AllowedTransports,
+		AllowTransportImport: params.AllowTransportImport,
+	}
+	return safety.CheckTransportImport(requests)
 }
 
 func init() {

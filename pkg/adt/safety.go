@@ -80,8 +80,10 @@ type SafetyConfig struct {
 
 	// AllowTransportImport lets vsp import released requests into the
 	// connected system (CTS_API_IMPORT_CHANGE_REQUEST, as STMS_IMPORT). Off by
-	// default, and independent of ReadOnly, which is about the repository:
-	// an import changes the system wholesale, so it is named on its own.
+	// default: an import changes the system wholesale, so it is named on its
+	// own. It is an opt-in on top of the other switches, not instead of them:
+	// ReadOnly, TransportReadOnly and AllowedTransports still refuse it (see
+	// CheckTransportImport).
 	// Use --allow-transport-import or SAP_ALLOW_TRANSPORT_IMPORT=true.
 	AllowTransportImport bool
 }
@@ -298,6 +300,30 @@ func (s *SafetyConfig) CheckTransport(transport, opName string, isWrite bool) er
 		}
 	}
 
+	return nil
+}
+
+// CheckTransportImport returns an error unless importing these requests into
+// the connected system is allowed. The import needs its own opt-in
+// (AllowTransportImport), and it fails closed under every switch that limits
+// changes: ReadOnly, TransportReadOnly, and AllowedTransports for each request.
+func (s *SafetyConfig) CheckTransportImport(requests []string) error {
+	if !s.AllowTransportImport {
+		return fmt.Errorf("importing requests is off for this system; enable it with allow_transport_import " +
+			"in .vsp.json, --allow-transport-import or SAP_ALLOW_TRANSPORT_IMPORT=true")
+	}
+	if s.ReadOnly {
+		return fmt.Errorf("importing requests is blocked: read-only mode is enabled (an import changes the system)")
+	}
+	if s.TransportReadOnly {
+		return fmt.Errorf("importing requests is blocked: transport read-only mode is enabled")
+	}
+	for _, r := range requests {
+		if !s.isTransportInWhitelist(r) {
+			return fmt.Errorf("importing request '%s' is blocked by safety configuration (allowed: %v)",
+				r, s.AllowedTransports)
+		}
+	}
 	return nil
 }
 

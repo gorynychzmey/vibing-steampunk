@@ -426,8 +426,10 @@ locally under your own logon. (From the domain controller TMS would need the
 target's TMSSUP logon, which a remote call cannot give.) The result carries
 TMS's return code and the tp steps this import added to TPALOG. It changes the
 system, so it is off unless allowed — `allow_transport_import` per system in
-`.vsp.json`, `--allow-transport-import` or `SAP_ALLOW_TRANSPORT_IMPORT=true` —
-independently of `--read-only`, which is about the repository:
+`.vsp.json`, `--allow-transport-import` or `SAP_ALLOW_TRANSPORT_IMPORT=true`.
+That switch is an opt-in on top of the others: `--read-only` and
+`--transport-read-only` still refuse the import, and `--allowed-transports`
+limits which requests it takes:
 
 ```bash
 vsp -s qas transport import TR-A                  # into qas, its own client

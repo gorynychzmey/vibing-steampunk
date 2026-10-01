@@ -145,7 +145,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.TransportReadOnly, "transport-read-only", false, "Only allow read operations on transports (list, get)")
 	rootCmd.Flags().StringSliceVar(&cfg.AllowedTransports, "allowed-transports", nil, "Restrict transport operations to specific transports (comma-separated, supports wildcards like A4HK*)")
 	rootCmd.Flags().BoolVar(&cfg.AllowTransportableEdits, "allow-transportable-edits", false, "Allow editing objects in transportable packages (requires transport parameter)")
-	rootCmd.Flags().BoolVar(&cfg.AllowTransportImport, "allow-transport-import", false, "Allow importing released requests into the connected system (as STMS_IMPORT there); independent of --read-only")
+	rootCmd.Flags().BoolVar(&cfg.AllowTransportImport, "allow-transport-import", false, "Allow importing released requests into the connected system (as STMS_IMPORT there); --read-only, --transport-read-only and --allowed-transports still apply")
 	rootCmd.Flags().StringVar(&cfg.TransportChoice, "transport-choice", "auto", "A write with no transport named: auto picks the object's own or an open request of yours that fits (and creates one with --enable-transports); off leaves it to SAP, which generates a request per write")
 
 	// Mode options

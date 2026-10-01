@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// Importing is off unless the system allows it -- independently of read-only,
-// which is about the repository. The refusal comes before any connection.
+// Importing is off unless the system allows it. The refusal comes before any
+// connection.
 func TestHandleImportTransport_IsOffUnlessAllowed(t *testing.T) {
 	server := NewServer(&Config{
 		BaseURL: "https://unreachable.invalid:44300", Username: "u", Password: "p", Client: "100",
@@ -45,5 +45,34 @@ func TestTransportList(t *testing.T) {
 		if got := transportList(tc.in); len(got) != tc.want {
 			t.Errorf("transportList(%v) = %v, want %d entries", tc.in, got, tc.want)
 		}
+	}
+}
+
+// The import's own switch does not override the others: read-only, transport
+// read-only and the allowed transports refuse it before any connection.
+func TestHandleImportTransport_FailsClosedUnderTheSafetySwitches(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"read-only", Config{ReadOnly: true}, "read-only"},
+		{"transport read-only", Config{TransportReadOnly: true}, "transport read-only"},
+		{"outside allowed transports", Config{AllowedTransports: []string{"A4HK*"}}, "TR-EXAMPLE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			cfg.BaseURL, cfg.Username, cfg.Password, cfg.Client = "https://unreachable.invalid:44300", "u", "p", "100"
+			cfg.AllowTransportImport = true
+			server := NewServer(&cfg)
+			res, err := server.handleImportTransport(context.Background(), newRequest(map[string]any{"transport": "TR-EXAMPLE"}))
+			if err != nil {
+				t.Fatalf("handleImportTransport: %v", err)
+			}
+			text := resultText(res)
+			if !res.IsError || !strings.Contains(text, "blocked") || !strings.Contains(text, tc.want) {
+				t.Errorf("want a refusal naming %q, got %s", tc.want, text)
+			}
+		})
 	}
 }
