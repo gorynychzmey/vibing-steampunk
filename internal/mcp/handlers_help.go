@@ -17,6 +17,14 @@ func handleHelp(topic string) *mcp.CallToolResult {
 	case "read":
 		return mcp.NewToolResultText(`SAP(action="read") - Read source code and metadata
 
+Print forms, through ZADT_VSP's form service (needs ZADT_VSP 2.4.0):
+  SAP(action="read", target="SSFO ZDEMO_SF")                    Smart Form, the SMARTFORMS download XML
+  SAP(action="read", target="FORM ZDEMO_SCRIPT")                SAPscript form, abapGit's FORM structure, every language
+  SAP(action="read", target="SFPF ZDEMO_PDF")                   Adobe form without its original-language layout
+  SAP(action="read", target="SFPF ZDEMO_PDF", params={"language": "ES"})   the XDP layout of one language
+  SAP(action="read", target="SFPI ZDEMO_IF")                    Adobe form interface
+  params: "info": true (package, languages, inactive version), "file_path" (write the document to a file)
+
 IDoc, as WE02 shows it (classic RFC; segment data EDID4-SDATA cannot be queried):
   SAP(action="read", target="IDOC 28757955")
   SAP(action="read", target="IDOC 28757955", params={"segment": "E1EDKA1"})   (prefix; "all_fields": true, "raw": true, "max_segments": 500)
@@ -54,6 +62,12 @@ Query data:
 
 	case "edit":
 		return mcp.NewToolResultText(`SAP(action="edit") - Edit source code
+
+Print forms (SSFO, FORM, SFPF, SFPI): the document as SAP(action="read") returns it, changed:
+  SAP(action="edit", target="SFPF ZDEMO_PDF", params={"language": "ES", "file_path": "zdemo_es.xdp", "transport": "A4HK900001"})
+  SAP(action="edit", target="SFPI ZDEMO_IF", params={"content": "<?xml ...", "test_run": true})
+  Adobe forms and interfaces are activated afterwards; a replaced Adobe form that does not activate is put back.
+  SAP(action="create", target="FORM ZDEMO_SCRIPT", params={"file_path": "zdemo.xml", "package": "$TMP"})   also SSFO
 
 High-level edit (recommended - auto lock/unlock/activate):
   SAP(action="edit", target="CLAS ZCL_TEST", params={"source": "CLASS zcl_test..."})
@@ -687,13 +701,13 @@ func getUnhandledErrorMessage(action, objectType, objectName string) string {
 
 	switch action {
 	case "read":
-		sb.WriteString("Supported read targets: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, TABL, TABL_CONTENTS, DEVC, MSAG, TRAN, TYPE_INFO, STRUCT, CDS_DEPS, IDOC\n")
+		sb.WriteString("Supported read targets: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, TABL, TABL_CONTENTS, DEVC, MSAG, TRAN, TYPE_INFO, STRUCT, CDS_DEPS, IDOC, SSFO, FORM, SFPF, SFPI\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"read\") for examples.")
 	case "edit":
-		sb.WriteString("Supported edit targets: CLAS, PROG, INTF, FUNC, DDLS, BDEF, SRVD, TABL, LOCK, UNLOCK, UPDATE_SOURCE, ACTIVATE, ACTIVATE_PACKAGE, EDITSOURCE, PUBLISH_SERVICE, UNPUBLISH_SERVICE\n")
+		sb.WriteString("Supported edit targets: CLAS, PROG, INTF, FUNC, DDLS, BDEF, SRVD, TABL, LOCK, UNLOCK, UPDATE_SOURCE, ACTIVATE, ACTIVATE_PACKAGE, EDITSOURCE, PUBLISH_SERVICE, UNPUBLISH_SERVICE, SSFO, FORM, SFPF, SFPI\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"edit\") for examples.")
 	case "create":
-		sb.WriteString("Supported create targets: OBJECT, DEVC, TABL, CLONE, PROGRAM, CLASS_WITH_TESTS, CLAS_TEST_INCLUDE\n")
+		sb.WriteString("Supported create targets: OBJECT, DEVC, TABL, CLONE, PROGRAM, CLASS_WITH_TESTS, CLAS_TEST_INCLUDE, SSFO, FORM\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"create\") for examples.")
 	case "debug":
 		sb.WriteString("Supported debug targets: SET_BREAKPOINT, GET_BREAKPOINTS, DELETE_BREAKPOINT, LISTEN, ATTACH, DETACH, STEP, GET_STACK, GET_VARIABLES, CALL_RFC, MOVE, RUN_REPORT, GET_VARIANTS, GET_TEXT_ELEMENTS, SET_TEXT_ELEMENTS, AMDP_ADT_*, AMDP_*\n")
