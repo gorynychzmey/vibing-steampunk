@@ -40,19 +40,30 @@ type Client struct {
 // NewClient creates a new ADT client with the given configuration.
 func NewClient(baseURL, username, password string, opts ...Option) *Client {
 	cfg := NewConfig(baseURL, username, password, opts...)
-	return &Client{
-		transport: NewTransport(cfg),
+	return newClient(cfg, NewTransport(cfg))
+}
+
+// newClient wires a client to its transport, including the lock window the
+// transport consults before reloading a cookie file and while routing
+// stateless requests.
+func newClient(cfg *Config, transport *Transport) *Client {
+	c := &Client{
+		transport: transport,
 		config:    cfg,
 	}
+	if transport != nil {
+		transport.lockOutstanding = c.lockOutstanding
+		// The transport keeps stateless requests out of the context a lock
+		// handle is bound to while one is outstanding (see Transport.do).
+		transport.locks = &c.locks
+	}
+	return c
 }
 
 // NewClientWithTransport creates a new client with a custom transport.
 // This is useful for testing.
 func NewClientWithTransport(cfg *Config, transport *Transport) *Client {
-	return &Client{
-		transport: transport,
-		config:    cfg,
-	}
+	return newClient(cfg, transport)
 }
 
 // StartKeepAlive starts a background goroutine that periodically pings the SAP server
@@ -476,7 +487,9 @@ func (c *Client) GetClassSource(ctx context.Context, className string) (string, 
 // GetClassMethods retrieves the list of methods in a class with their source line boundaries.
 // This is useful for method-level source operations (GetSource with method, EditSource with method).
 func (c *Client) GetClassMethods(ctx context.Context, className string) ([]MethodInfo, error) {
-	className = strings.ToUpper(className)
+	// The name may arrive already escaped from a URL; normalize to the raw
+	// name so it is escaped exactly once below.
+	className = strings.ToUpper(unescapeObjectName(className))
 
 	// Fetch objectstructure endpoint
 	path := fmt.Sprintf("/sap/bc/adt/oo/classes/%s/objectstructure", url.PathEscape(className))
@@ -498,7 +511,9 @@ func (c *Client) GetClassMethods(ctx context.Context, className string) ([]Metho
 
 // GetClassObjectStructure returns the full parsed class structure (methods, attributes, types, events).
 func (c *Client) GetClassObjectStructure(ctx context.Context, className string) (*ClassObjectStructure, error) {
-	className = strings.ToUpper(className)
+	// The name may arrive already escaped from a URL; normalize to the raw
+	// name so it is escaped exactly once below.
+	className = strings.ToUpper(unescapeObjectName(className))
 
 	path := fmt.Sprintf("/sap/bc/adt/oo/classes/%s/objectstructure", url.PathEscape(className))
 	resp, err := c.transport.Request(ctx, path, &RequestOptions{
@@ -1183,6 +1198,8 @@ func (c *Client) GetStructure(ctx context.Context, structName string) (string, e
 type TableContentsResult struct {
 	Columns []TableColumn
 	Rows    []map[string]interface{}
+	// Notes says what RunQuery rewrote before sending the statement.
+	Notes []string `json:",omitempty"`
 }
 
 // TableColumn represents a column in table contents.
@@ -1229,12 +1246,30 @@ func (c *Client) GetTableContents(ctx context.Context, tableName string, maxRows
 
 // RunQuery executes a freestyle SQL query against the SAP database.
 // Example: "SELECT * FROM T000 WHERE MANDT = '001'"
+//
+// ANSI spellings the data preview rejects (t.col, DESC, a closing period)
+// are rewritten first, and the result says so in Notes. A query SAP refuses
+// comes back as a *QueryError: SAP's message without the XML around it, and
+// hints such as the columns the table does have.
 func (c *Client) RunQuery(ctx context.Context, sqlQuery string, maxRows int) (*TableContentsResult, error) {
 	// Safety check - free SQL can be dangerous
 	if err := c.checkSafety(OpFreeSQL, "RunQuery"); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(sqlQuery) == "" {
+		return nil, fmt.Errorf("SQL query is required")
+	}
+	sent, notes := normalizeOpenSQL(sqlQuery)
+	res, err := c.runQueryRaw(ctx, sent, maxRows)
+	if err != nil {
+		return nil, c.explainQueryError(ctx, sent, notes, err)
+	}
+	res.Notes = notes
+	return res, nil
+}
 
+// runQueryRaw sends a statement to the data preview as it is.
+func (c *Client) runQueryRaw(ctx context.Context, sqlQuery string, maxRows int) (*TableContentsResult, error) {
 	if sqlQuery == "" {
 		return nil, fmt.Errorf("SQL query is required")
 	}
@@ -1270,9 +1305,20 @@ func wrapSQL(query string) string {
 	lineLen := 0
 	inQuote := false
 	start := 0
-	emit := func(word string) {
+	var emit func(word string)
+	emit = func(word string) {
 		if word == "" {
 			return
+		}
+		// A word longer than a line -- an IN list written without blanks --
+		// is broken after its commas, which ABAP SQL reads the same way.
+		if len(word) > limit {
+			if parts := splitAtCommas(word); len(parts) > 1 {
+				for _, p := range parts {
+					emit(p)
+				}
+				return
+			}
 		}
 		if lineLen > 0 && lineLen+1+len(word) > limit {
 			out.WriteByte('\n')
@@ -1302,6 +1348,28 @@ func wrapSQL(query string) string {
 	}
 	emit(query[start:])
 	return out.String()
+}
+
+// splitAtCommas cuts a word after each comma outside quotes.
+func splitAtCommas(word string) []string {
+	var parts []string
+	in := false
+	start := 0
+	for i := 0; i < len(word); i++ {
+		switch word[i] {
+		case '\'':
+			in = !in
+		case ',':
+			if !in {
+				parts = append(parts, word[start:i+1])
+				start = i + 1
+			}
+		}
+	}
+	if start < len(word) {
+		parts = append(parts, word[start:])
+	}
+	return parts
 }
 
 // parseTableContents parses the XML response for table contents.
