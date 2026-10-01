@@ -138,8 +138,21 @@ func (s *Server) handleUpdateSource(ctx context.Context, request mcp.CallToolReq
 		sourceURL = objectURL + "/source/main"
 	}
 
-	err := s.withObjectLock(ctx, objectURL, lockHandle, func(handle string) error {
-		return s.adtClient.UpdateSource(ctx, sourceURL, source, handle, transport)
+	updateCtx := ctx
+	if lockHandle == "" {
+		// Resolve and approve the package before acquiring the session-bound
+		// lock. UpdateSource reuses this per-object marker, so it still runs
+		// every policy check but does not issue a stateless SearchObject inside
+		// the LOCK -> PUT -> UNLOCK window (#169).
+		var err error
+		updateCtx, err = s.adtClient.PrepareSourceUpdate(ctx, objectURL, transport)
+		if err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to update source: %v", err)), nil
+		}
+	}
+
+	err := s.withObjectLock(updateCtx, objectURL, lockHandle, func(handle string) error {
+		return s.adtClient.UpdateSource(updateCtx, sourceURL, source, handle, transport)
 	})
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to update source: %v", err)), nil
@@ -568,8 +581,21 @@ func (s *Server) handleDeleteObject(ctx context.Context, request mcp.CallToolReq
 		transport = t
 	}
 
-	err := s.withObjectLockConsumed(ctx, objectURL, lockHandle, func(handle string) error {
-		return s.adtClient.DeleteObject(ctx, objectURL, handle, transport)
+	// When the handler takes its own lock, run DeleteObject's gate first.
+	// Called under the lock, its package lookup is a stateless request that
+	// retires the session the handle belongs to, and the DELETE comes back
+	// 423 (issue #238). A supplied handle was taken in an earlier call, so no
+	// ordering here can protect it; that window is #169.
+	objCtx := ctx
+	if lockHandle == "" {
+		var err error
+		if objCtx, err = s.adtClient.PrepareDelete(ctx, objectURL, transport); err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
+		}
+	}
+
+	err := s.withObjectLockConsumed(objCtx, objectURL, lockHandle, func(handle string) error {
+		return s.adtClient.DeleteObject(objCtx, objectURL, handle, transport)
 	})
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
