@@ -64,10 +64,10 @@ func TestReadIDocSegment_OrdersFieldsAndVersions(t *testing.T) {
 func TestChangeIDocSegment_KeepsReleasedFields(t *testing.T) {
 	c := &Client{config: &Config{}}
 	for name, fields := range map[string][]SegmentField{
-		"dropped":  {{Name: "MATNR", DataElement: "MATNR"}},
-		"swapped":  {{Name: "FLAG", DataElement: "CHAR1"}, {Name: "MATNR", DataElement: "MATNR"}},
-		"retyped":  {{Name: "MATNR", DataElement: "MATNR"}, {Name: "FLAG", DataElement: "CHAR10"}},
-		"renamed":  {{Name: "MATNR", DataElement: "MATNR"}, {Name: "FLAG2", DataElement: "CHAR1"}},
+		"dropped": {{Name: "MATNR", DataElement: "MATNR"}},
+		"swapped": {{Name: "FLAG", DataElement: "CHAR1"}, {Name: "MATNR", DataElement: "MATNR"}},
+		"retyped": {{Name: "MATNR", DataElement: "MATNR"}, {Name: "FLAG", DataElement: "CHAR10"}},
+		"renamed": {{Name: "MATNR", DataElement: "MATNR"}, {Name: "FLAG2", DataElement: "CHAR1"}},
 	} {
 		run := releasedSegment()
 		_, err := c.ChangeIDocSegment(context.Background(), SegmentChange{Name: "Z1DEMO", Transport: "A4HK900001", Fields: fields}, run)

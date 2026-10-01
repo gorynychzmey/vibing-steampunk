@@ -16,7 +16,7 @@ func TestSegmentFields_TakesObjectsAndStrings(t *testing.T) {
 	if _, given, _ := segmentFields(map[string]any{}); given {
 		t.Error("no fields reported as given")
 	}
-	if _, _, err := segmentFields(map[string]any{"fields": []any{"FLAG"}}); err == nil {
+	if _, _, ferr := segmentFields(map[string]any{"fields": []any{"FLAG"}}); ferr == nil {
 		t.Error("a field without a data element was accepted")
 	}
 	fields, _, err = segmentFields(map[string]any{"fields": `["A CHAR1"]`})

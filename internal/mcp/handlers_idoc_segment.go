@@ -9,6 +9,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	openrfc "github.com/oisee/open-rfc-go/rfc"
+
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
 
@@ -34,10 +35,10 @@ func (s *Server) routeIDocSegmentAction(ctx context.Context, action, objectType,
 
 // withBackgroundRunner hands fn a runner on this server's RFC connection and
 // renders what it returns.
-func (s *Server) withBackgroundRunner(ctx context.Context, args map[string]any, what string, fn func(adt.BackgroundRunner) (any, string, []string, error)) (*mcp.CallToolResult, error) {
+func (s *Server) withBackgroundRunner(ctx context.Context, args map[string]any, fn func(adt.BackgroundRunner) (any, string, []string, error)) (*mcp.CallToolResult, error) {
 	c, release, err := s.rfcClientFor(ctx, args)
 	if err != nil {
-		return newToolResultError(what + " need the RFC connection: " + err.Error()), nil
+		return newToolResultError("IDoc segments need the RFC connection: " + err.Error()), nil
 	}
 	defer release()
 	res, program, warnings, err := fn(rfcClassicBadiRunner{c: c})
@@ -111,7 +112,7 @@ func segmentFields(args map[string]any) ([]adt.SegmentField, bool, error) {
 // handleReadIDocSegment: SAP(action="read", target="SEGM Z1DEMO").
 func (s *Server) handleReadIDocSegment(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := request.GetArguments()
-	return s.withBackgroundRunner(ctx, args, "IDoc segments", func(r adt.BackgroundRunner) (any, string, []string, error) {
+	return s.withBackgroundRunner(ctx, args, func(r adt.BackgroundRunner) (any, string, []string, error) {
 		seg, err := s.adtClient.ReadIDocSegment(ctx, getStringParam(args, "name"), r)
 		if err != nil {
 			return nil, "", nil, err
@@ -137,7 +138,7 @@ func (s *Server) handleCreateIDocSegment(ctx context.Context, request mcp.CallTo
 	}
 	o.Qualified, _ = getBoolParam(args, "qualified")
 	o.Release, _ = getBoolParam(args, "release")
-	return s.withBackgroundRunner(ctx, args, "IDoc segments", func(r adt.BackgroundRunner) (any, string, []string, error) {
+	return s.withBackgroundRunner(ctx, args, func(r adt.BackgroundRunner) (any, string, []string, error) {
 		return segmentOutcome(s.adtClient.CreateIDocSegment(ctx, o, r))
 	})
 }
@@ -160,7 +161,7 @@ func (s *Server) handleChangeIDocSegment(ctx context.Context, request mcp.CallTo
 	if v, ok := getBoolParam(args, "release"); ok {
 		o.Release = &v
 	}
-	return s.withBackgroundRunner(ctx, args, "IDoc segments", func(r adt.BackgroundRunner) (any, string, []string, error) {
+	return s.withBackgroundRunner(ctx, args, func(r adt.BackgroundRunner) (any, string, []string, error) {
 		return segmentOutcome(s.adtClient.ChangeIDocSegment(ctx, o, r))
 	})
 }
@@ -168,7 +169,7 @@ func (s *Server) handleChangeIDocSegment(ctx context.Context, request mcp.CallTo
 // handleDeleteIDocSegment: SAP(action="delete", target="SEGM Z1DEMO", params={"transport": "..."}).
 func (s *Server) handleDeleteIDocSegment(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := request.GetArguments()
-	return s.withBackgroundRunner(ctx, args, "IDoc segments", func(r adt.BackgroundRunner) (any, string, []string, error) {
+	return s.withBackgroundRunner(ctx, args, func(r adt.BackgroundRunner) (any, string, []string, error) {
 		return segmentOutcome(s.adtClient.DeleteIDocSegment(ctx, getStringParam(args, "name"), getStringParam(args, "transport"), r))
 	})
 }
