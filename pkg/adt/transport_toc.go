@@ -141,7 +141,7 @@ func (c *Client) copyToTransportOfCopies(ctx context.Context, bridge functionBri
 	// Every object the copy would carry must pass the package policy, before
 	// anything is created: a transport of copies is a way to put objects
 	// into another system, and --allowed-packages bounds which ones.
-	if err := c.checkTransportOfCopiesPackages(ctx, source, from); err != nil {
+	if err = c.checkTransportOfCopiesPackages(ctx, source, from); err != nil {
 		return nil, err
 	}
 
