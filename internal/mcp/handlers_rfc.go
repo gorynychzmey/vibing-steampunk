@@ -64,6 +64,9 @@ func (s *Server) routeRFCAction(ctx context.Context, action, objectType, objectN
 		if err := s.adtClient.Safety().CheckOperation(adt.OpWorkflow, "RFCCall"); err != nil {
 			return nil, true, err
 		}
+		if isTransportImportFM(name) {
+			return nil, true, s.refuseImportCall(name)
+		}
 	}
 
 	c, release, err := s.rfcClientFor(ctx, params)
@@ -157,6 +160,38 @@ func (s *Server) routeRFCAction(ctx context.Context, action, objectType, objectN
 		return rfcResult(rows)
 	}
 	return nil, true, fmt.Errorf("unknown rfc op %q (info, ping, probe, describe, call, search, read_table)", op)
+}
+
+// importFunctionModules import requests into a system, as STMS_IMPORT does.
+// TMS_* modules with IMPORT in the name count as well (isTransportImportFM).
+var importFunctionModules = map[string]bool{
+	"CTS_API_IMPORT_CHANGE_REQUEST": true,
+	"TMS_MGR_IMPORT_TR_REQUEST":     true,
+	"TMS_TP_IMPORT":                 true,
+}
+
+// isTransportImportFM says whether calling this function module imports
+// requests: one of importFunctionModules, or any TMS_*IMPORT* module.
+func isTransportImportFM(name string) bool {
+	n := strings.ToUpper(strings.TrimSpace(name))
+	return importFunctionModules[n] || (strings.HasPrefix(n, "TMS_") && strings.Contains(n, "IMPORT"))
+}
+
+// refuseImportCall is the answer to op="call" on an import function module.
+// The import's own gate (allow_transport_import, read-only, transport
+// read-only, allowed ops and transports) refuses it first. Where that gate
+// would let an import through, the call is still refused: its arguments can
+// name another target (SYSTEM, IV_SYSTEM, a host/sysnr override) and spell the
+// requests in more than one way, so only import_transport, which pins the
+// server's own system and checks each request, can run an import.
+func (s *Server) refuseImportCall(name string) error {
+	fm := strings.ToUpper(strings.TrimSpace(name))
+	if err := s.adtClient.Safety().CheckTransportImport(nil); err != nil {
+		return fmt.Errorf("rfc call %s is blocked: %w", fm, err)
+	}
+	return fmt.Errorf("rfc call %s is blocked: import requests with "+
+		`SAP(action="system", params={"type":"import_transport","transport":"<request>"}), `+
+		"which imports into this server's own system only", fm)
 }
 
 // rfcClientFor returns a client for this call and a release function. Calls
