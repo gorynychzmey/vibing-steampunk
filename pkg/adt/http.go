@@ -141,11 +141,11 @@ type Transport struct {
 	// stateless requests are kept out of the stateful context (see do).
 	locks *lockWindow
 
-	// contextMu admits one request at a time into the stateful context, and
+	// contextGate admits one request at a time into the stateful context, and
 	// keeps a stateless request that is allowed to end the context from
 	// racing one that is using it. contextInFlight counts the stateful
 	// requests under way or waiting (see do).
-	contextMu       sync.RWMutex
+	contextGate     contextGate
 	contextInFlight atomic.Int32
 }
 
@@ -1103,16 +1103,20 @@ func stripContextID(req *http.Request) {
 //
 // A stateless request outside any lock window still goes into the context and
 // ends it, as before -- that is how a finished chain's context is retired. It
-// holds contextMu for reading while it does, so a LOCK cannot open a window in
-// the context it is about to end; stateless requests still run side by side.
+// holds the gate shared while it does, so a LOCK cannot open a window in the
+// context it is about to end; stateless requests still run side by side. A
+// stateless request never waits for the gate: when a request into the context
+// holds it or waits for it, the stateless one goes isolated at once. Requests
+// into the context wait their turn only as long as their own context lasts.
 func (t *Transport) do(req *http.Request) (*http.Response, error) {
 	if req.Header.Get("X-sap-adt-sessiontype") == "stateless" {
-		t.contextMu.RLock()
-		if t.contextInFlight.Load() == 0 && (t.locks == nil || !t.locks.present()) {
-			defer t.contextMu.RUnlock()
-			return t.httpClient.Do(req)
+		if t.contextGate.tryShared() {
+			if t.contextInFlight.Load() == 0 && (t.locks == nil || !t.locks.present()) {
+				defer t.contextGate.releaseShared()
+				return t.httpClient.Do(req)
+			}
+			t.contextGate.releaseShared()
 		}
-		t.contextMu.RUnlock()
 		// Cookies supplied with the configuration (browser or SAML logon)
 		// were put on the request already, sap-contextid among them; it
 		// would end the context just the same. The empty one the proxy guard
@@ -1137,7 +1141,90 @@ func (t *Transport) do(req *http.Request) (*http.Response, error) {
 		t.contextInFlight.Add(1)
 		defer t.contextInFlight.Add(-1)
 	}
-	t.contextMu.Lock()
-	defer t.contextMu.Unlock()
+	if err := t.contextGate.lock(req.Context()); err != nil {
+		return nil, &url.Error{Op: urlErrorOp(req.Method), URL: req.URL.String(), Err: err}
+	}
+	defer t.contextGate.unlock()
 	return t.httpClient.Do(req)
+}
+
+// urlErrorOp names the method the way net/http does in its *url.Error.
+func urlErrorOp(method string) string {
+	if method == "" {
+		return "Get"
+	}
+	return method[:1] + strings.ToLower(method[1:])
+}
+
+// contextGate is a readers-writer lock whose writers stop waiting when their
+// request's context ends, and whose readers never wait at all: tryShared fails
+// while a writer holds the gate or waits for it, so readers cannot starve a
+// writer. The zero value is an open gate.
+type contextGate struct {
+	mu      sync.Mutex
+	shared  int
+	held    bool
+	waiting int
+	changed chan struct{} // closed when the gate is released, then replaced
+}
+
+// tryShared takes the gate shared if no writer holds it or waits for it.
+func (g *contextGate) tryShared() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.held || g.waiting > 0 {
+		return false
+	}
+	g.shared++
+	return true
+}
+
+func (g *contextGate) releaseShared() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.shared--
+	if g.shared == 0 {
+		g.wake()
+	}
+}
+
+// lock takes the gate exclusively, or gives up with ctx's error.
+func (g *contextGate) lock(ctx context.Context) error {
+	g.mu.Lock()
+	g.waiting++
+	for g.held || g.shared > 0 {
+		if g.changed == nil {
+			g.changed = make(chan struct{})
+		}
+		changed := g.changed
+		g.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			g.mu.Lock()
+			g.waiting--
+			g.mu.Unlock()
+			return ctx.Err()
+		}
+		g.mu.Lock()
+	}
+	g.waiting--
+	g.held = true
+	g.mu.Unlock()
+	return nil
+}
+
+func (g *contextGate) unlock() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.held = false
+	g.wake()
+}
+
+// wake lets every waiter look at the gate again. g.mu is held.
+func (g *contextGate) wake() {
+	if g.changed != nil {
+		close(g.changed)
+		g.changed = nil
+	}
 }

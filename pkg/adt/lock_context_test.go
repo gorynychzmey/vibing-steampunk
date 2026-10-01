@@ -2,6 +2,7 @@ package adt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -220,5 +221,62 @@ func TestStripContextID(t *testing.T) {
 	stripContextID(req)
 	if _, err := req.Cookie("sap-contextid"); err != nil {
 		t.Error("the guard's empty sap-contextid was removed")
+	}
+}
+
+// A stateful request the server never answers must hold up neither a stateless
+// read, which goes isolated straight away, nor, past its own context, another
+// request waiting for the stateful context.
+func TestLockContext_AStuckStatefulRequestHoldsUpNobody(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-csrf-token", "TOKEN")
+		if r.URL.Path == "/stuck" {
+			entered <- struct{}{}
+			<-release
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) }) // runs first: lets the stuck handler go
+	c := NewClient(srv.URL, "TESTUSER", "pw")
+
+	go func() {
+		_, _ = c.transport.Request(context.Background(), "/stuck", &RequestOptions{Stateful: true})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stateful request never reached the server")
+	}
+
+	finish := func(name string, run func() error) error {
+		done := make(chan error, 1)
+		go func() { done <- run() }()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s is still waiting behind the stuck stateful request", name)
+			return nil
+		}
+	}
+
+	if err := finish("a stateless read", func() error {
+		_, err := c.transport.Request(context.Background(), "/sap/bc/adt/repository/informationsystem/search", nil)
+		return err
+	}); err != nil {
+		t.Errorf("stateless read: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := finish("a stateful request whose context ended", func() error {
+		_, err := c.transport.Request(ctx, "/sap/bc/adt/programs/programs/ZDEMO", &RequestOptions{Stateful: true})
+		return err
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("stateful request with an expired context: got %v, want %v", err, context.DeadlineExceeded)
 	}
 }
