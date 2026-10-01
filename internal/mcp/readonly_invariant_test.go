@@ -594,6 +594,9 @@ var readOnlyClasses = map[string]surfaceClass{
 	"SAP system type=add_to_transport":        clsMutate,
 	"SAP system type=remove_transport_object": clsMutate,
 	"SAP system type=remove_from_transport":   clsMutate,
+	"SAP system type=import_transport":        clsMutate,
+	"SAP system type=import_transports":       clsMutate,
+	"SAP system type=import_status":           clsRead,
 	"SAP system type=ui5_list_apps":           clsRead,
 	"SAP system type=ui5_get_app":             clsRead,
 	"SAP system type=ui5_get_file":            clsRead,
@@ -1088,6 +1091,9 @@ func actionCases() []actionCase {
 		{Name: "SAP system type=add_to_transport", Action: "system", Exact: true, Params: kv("type", "add_to_transport", "object", "R3TR PROG ZDEMO_REPORT", "transport", "TR-EXAMPLE")},
 		{Name: "SAP system type=remove_transport_object", Action: "system", Exact: true, Params: kv("type", "remove_transport_object", "object", "R3TR PROG ZDEMO_REPORT", "transport", "TR-EXAMPLE")},
 		{Name: "SAP system type=remove_from_transport", Action: "system", Exact: true, Params: kv("type", "remove_from_transport", "object", "R3TR PROG ZDEMO_REPORT", "transport", "TR-EXAMPLE")},
+		{Name: "SAP system type=import_transport", Action: "system", Exact: true, Params: kv("type", "import_transport", "transport", "TR-EXAMPLE")},
+		{Name: "SAP system type=import_transports", Action: "system", Exact: true, Params: kv("type", "import_transports", "transports", "TR-EXAMPLE,TR-EXAMPLE2")},
+		{Name: "SAP system type=import_status", Action: "system", Exact: true, Params: kv("type", "import_status", "transport", "TR-EXAMPLE")},
 		sys("ui5_list_apps", "UI5ListApps"), sys("ui5_get_app", "UI5GetApp"), sys("ui5_get_file", "UI5GetFileContent"),
 		sys("ui5_upload_file", "UI5UploadFile"), sys("ui5_delete_file", "UI5DeleteFile"),
 		sys("ui5_create_app", "UI5CreateApp"), sys("ui5_delete_app", "UI5DeleteApp"),
@@ -1566,9 +1572,11 @@ func readOnlyConfig(base string) *Config {
 		Client:   "001",
 		Language: "EN",
 		ReadOnly: true,
-		// Transports are enabled so that --read-only, and nothing else, is
-		// what stands between a transport write and SAP.
-		EnableTransports: true,
+		// Transports and the transport import are enabled so that
+		// --read-only, and nothing else, is what stands between a transport
+		// write or an import and SAP.
+		EnableTransports:     true,
+		AllowTransportImport: true,
 	}
 }
 

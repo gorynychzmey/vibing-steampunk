@@ -37,14 +37,14 @@ func TestRFCCall_ImportFunctionModulesRefusedBeforeLogon(t *testing.T) {
 			port, dials := fakeGateway(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, handled, err := s.routeRFCAction(ctx, "rfc", tc.fm, "", rfcParams(port, tc.extra))
+			_, handled, err := s.routeRFCAction(ctx, "rfc", tc.fm, "", rfcParams(t, port, tc.extra))
 			if !handled {
 				t.Fatal("rfc action not handled")
 			}
 			if err == nil || !strings.Contains(err.Error(), "is blocked") || !strings.Contains(err.Error(), tc.wantInErr) {
 				t.Fatalf("want a refusal naming %q, got %v", tc.wantInErr, err)
 			}
-			if n := waitDials(dials, 1, 200*time.Millisecond); n != 0 {
+			if n := dials(); n != 0 {
 				t.Errorf("refused import call still dialled the gateway %d time(s)", n)
 			}
 		})
