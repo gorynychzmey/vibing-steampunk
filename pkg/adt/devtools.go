@@ -222,6 +222,17 @@ func (c *Client) activateWithInactiveParts(ctx context.Context, objectURL, objec
 		}
 		return refused, nil
 	}
+	// With a cookie or SSO logon the client does not know its user name, so
+	// it cannot tell its own inactive parts from a colleague's. It activates
+	// none of them then, and names them for the caller to activate by name.
+	if c.config.Username == "" {
+		refused.Inactive = parts
+		refused.Messages = append(refused.Messages, ActivationResultMessage{
+			Type:      "W",
+			ShortText: "Parts of the object are inactive; whose they are is unknown without a user name (cookie/SSO logon), so they were not activated with it -- activate them by name",
+		})
+		return refused, nil
+	}
 	refs := []ObjectRef{{URI: objectURL, Name: objectName}}
 	for _, p := range parts {
 		refs = append(refs, ObjectRef{URI: p.URI, Name: p.Name})
@@ -234,7 +245,12 @@ func (c *Client) activateWithInactiveParts(ctx context.Context, objectURL, objec
 		return result, nil
 	}
 	if len(result.Messages) == 0 && len(result.Inactive) == 0 {
+		// Refused again without a word: name what is still inactive now, not
+		// everything that was tried -- some parts may have gone through.
 		result.Inactive = parts
+		if after, rerr := c.GetInactiveObjects(ctx); rerr == nil {
+			result.Inactive = inactivePartsOf(objectURL, c.config.Username, after)
+		}
 	}
 	return result, nil
 }
