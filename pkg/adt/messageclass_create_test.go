@@ -1,8 +1,12 @@
 package adt
 
 import (
+	"context"
 	"encoding/xml"
+	"io"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -36,5 +40,33 @@ func TestMessageClassWriteCarriesTheLanguage(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `adtcore:language="DE"`) {
 		t.Errorf("no language in %s", b)
+	}
+}
+
+// The same through WriteMessageClassTexts: the PUT body carries the language
+// asked for (uppercased), not the struct default.
+func TestWriteMessageClassTexts_PutBodyCarriesTheLanguage(t *testing.T) {
+	var mu sync.Mutex
+	var putBody string
+	client := newStubbedClient(t, &adtRecorder{}, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/messageclass/") {
+			b, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			putBody = string(b)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	if err := client.WriteMessageClassTexts(context.Background(), "ZDEMO_MC", "de",
+		[]MessageClassMessage{{Number: "001", Text: "Hallo"}}, "HANDLE", ""); err != nil {
+		t.Fatalf("WriteMessageClassTexts: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if putBody == "" {
+		t.Fatal("no PUT of the message class reached the server")
+	}
+	if !strings.Contains(putBody, `adtcore:language="DE"`) {
+		t.Errorf("PUT body has no adtcore:language=\"DE\":\n%s", putBody)
 	}
 }
