@@ -310,7 +310,7 @@ func statusRecords(rows []map[string]any, texts map[string]string) []IDocStatus 
 			counter: str(r["COUNTR"]),
 			Segment: strings.TrimLeft(str(r["SEGNUM"]), "0"),
 			User:    str(r["UNAME"]),
-			Program: str(r["REPID"]),
+			Program: str(r["REPID"]), //nolint:misspell // EDIDS-REPID, the SAP field name
 		}
 		if id := str(r["STAMID"]); id != "" {
 			s.Message = id + " " + str(r["STAMNO"])
