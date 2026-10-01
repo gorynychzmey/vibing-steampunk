@@ -316,7 +316,15 @@ func (c *Client) runSegmentReport(ctx context.Context, res *SegmentResult, r seg
 	if err != nil {
 		return res, err
 	}
-	return res, applySegmentLog(res, tr.Lines)
+	if err := applySegmentLog(res, tr.Lines); err != nil {
+		// The modules need each step committed before the next, so the
+		// steps that ran before the failure stay done; say which.
+		if len(res.Steps) > 0 {
+			err = fmt.Errorf("%w (done before the failure, each committed: %s)", err, strings.Join(res.Steps, ", "))
+		}
+		return res, err
+	}
+	return res, nil
 }
 
 func checkSegmentTransport(name, pkg, transport string) error {
@@ -519,7 +527,8 @@ func segmentReportSource(prog string, r segmentReport) string {
       gv_order TYPE e070-trkorr,
       gv_pkg TYPE devclass,
       gv_res TYPE sy-subrc,
-      gv_was_closed TYPE c.
+      gv_was_closed TYPE c,
+      gv_reopened TYPE c.
 
 START-OF-SELECTION.
 `)
@@ -646,6 +655,7 @@ FORM unclose.
     PERFORM fail USING 'SEGMENTDEFINITION_UNCLOSE'.
   ENDIF.
   PERFORM step USING 'UNCLOSE' gs_def-segdef.
+  gv_reopened = 'X'.
 ENDFORM.
 
 FORM close.
@@ -659,6 +669,7 @@ FORM close.
     PERFORM fail USING 'SEGMENTDEFINITION_CLOSE'.
   ENDIF.
   PERFORM step USING 'CLOSE' gs_def-segdef.
+  CLEAR gv_reopened.
 ENDFORM.
 
 * Every step is committed on its own: the next one reads what the last one
@@ -698,6 +709,24 @@ FORM fail_text USING iv_step TYPE csequence iv_text TYPE csequence.
   lv_msg = |{ iv_step }: { iv_text }|.
   ROLLBACK WORK.
   PERFORM say USING 'ERR' lv_msg.
+* Each step is committed, so a failure after UNCLOSE would leave a released
+* segment open. Release it again, as it was before this run.
+  IF gv_reopened = 'X'.
+    CLEAR gv_reopened.
+    CALL FUNCTION 'SEGMENTDEFINITION_CLOSE'
+      EXPORTING segmenttyp = gc_seg
+      IMPORTING segmentdefinition = gs_def
+                task = gv_task
+      CHANGING order = gv_order
+      EXCEPTIONS OTHERS = 1.
+    IF sy-subrc = 0.
+      COMMIT WORK AND WAIT.
+      PERFORM say USING 'WARN' 'The segment was reopened for this change and is released again, as before.'.
+    ELSE.
+      ROLLBACK WORK.
+      PERFORM say USING 'WARN' 'The segment was reopened for this change and could not be released again; it is open now.'.
+    ENDIF.
+  ENDIF.
   LEAVE PROGRAM.
 ENDFORM.
 `)
