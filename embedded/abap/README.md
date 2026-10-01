@@ -46,7 +46,7 @@ The WebSocket handler enables **stateful operations** not available through stan
 | `zcl_vsp_debug_service.clas.abap` | Class | Debug domain - TPDAPI integration |
 | `zcl_vsp_amdp_service.clas.abap` | Class | AMDP domain - HANA/SQLScript debugging |
 | `zcl_vsp_git_service.clas.abap` | Class | Git domain - abapGit integration (158 object types) |
-| `zcl_vsp_report_service.clas.abap` | Class | Report domain - background jobs with spool output |
+| `zcl_vsp_report_service.clas.abap` | Class | Report domain - runs a report synchronously (SUBMIT ... AND RETURN), optionally capturing its ALV output |
 | `zcl_vsp_utils.clas.abap` | Class | Shared JSON and parameter helpers |
 | `zcl_vsp_tadir_move.clas.abap` | Class | TADIR package reassignment helper |
 
