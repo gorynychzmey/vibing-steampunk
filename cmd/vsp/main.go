@@ -319,12 +319,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Load transport_attribute from default system if not already set via env
-		if cfg.TransportAttribute == "" && systemsCfg.Default != "" {
-			if sys, err := systemsCfg.GetSystem(systemsCfg.Default); err == nil && sys.TransportAttribute != "" {
-				cfg.TransportAttribute = sys.TransportAttribute
-			}
-		}
+		applyDefaultSystemSettings(cfg, systemsCfg)
 	}
 
 	// The binary's own identity, so SAP() can say which build answered. An
@@ -344,6 +339,29 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return srv.ServeHTTP(addr)
 	default:
 		return srv.ServeStdio()
+	}
+}
+
+// applyDefaultSystemSettings fills what the flags and the environment left
+// empty from the default system in .vsp.json: transport_attribute, and where a
+// request vsp creates is filed, cts_project and transport_target. The CLI takes
+// the same keys from the system it runs against (resolveSystemParams).
+func applyDefaultSystemSettings(c *mcp.Config, systemsCfg *config.SystemsConfig) {
+	if systemsCfg == nil || systemsCfg.Default == "" {
+		return
+	}
+	sys, err := systemsCfg.GetSystem(systemsCfg.Default)
+	if err != nil {
+		return
+	}
+	if c.TransportAttribute == "" && sys.TransportAttribute != "" {
+		c.TransportAttribute = sys.TransportAttribute
+	}
+	if c.CTSProject == "" && sys.CTSProject != "" {
+		c.CTSProject = sys.CTSProject
+	}
+	if c.TransportTarget == "" && sys.TransportTarget != "" {
+		c.TransportTarget = sys.TransportTarget
 	}
 }
 
