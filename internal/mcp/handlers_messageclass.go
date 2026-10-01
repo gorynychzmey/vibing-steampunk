@@ -31,6 +31,11 @@ func (s *Server) createMessageClass(ctx context.Context, opts adt.CreateObjectOp
 		"object_url": adt.GetObjectURL(opts.ObjectType, opts.Name, ""),
 	}
 	if len(messages) > 0 {
+		// The class was created in the session language; its messages go
+		// in the same one unless a language was named.
+		if lang == "" {
+			lang = strings.ToUpper(s.adtClient.Language())
+		}
 		if lang == "" {
 			lang = "EN"
 		}

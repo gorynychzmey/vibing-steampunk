@@ -165,13 +165,13 @@ func (c *Client) GetMessageClassTexts(ctx context.Context, name, lang string) ([
 // are. With lockHandle empty it takes and releases the lock itself, after the
 // package gate -- the gate's lookup inside a lock window would retire the
 // session the lock belongs to (#91).
-func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, texts []MessageClassMessage, lockHandle, transport string) error {
+func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, texts []MessageClassMessage, lockHandle, transport string) (err error) {
 	name = strings.ToUpper(name)
 	lang = strings.ToUpper(lang)
 	objectURL := fmt.Sprintf("/sap/bc/adt/messageclass/%s", url.PathEscape(strings.ToLower(name)))
 
 	// Unified mutation policy gate (op type + package + transport)
-	ctx, err := c.gateAndMark(ctx, MutationContext{
+	ctx, err = c.gateAndMark(ctx, MutationContext{
 		Op:        OpUpdate,
 		OpName:    "WriteMessageClassTexts",
 		ObjectURL: objectURL,
@@ -181,11 +181,22 @@ func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, 
 		return err
 	}
 	if lockHandle == "" {
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
-		if err != nil {
-			return fmt.Errorf("locking message class %s: %w", name, err)
+		lock, lerr := c.LockObject(ctx, objectURL, "MODIFY")
+		if lerr != nil {
+			return fmt.Errorf("locking message class %s: %w", name, lerr)
 		}
-		defer func() { _ = c.UnlockObject(ctx, objectURL, lock.LockHandle) }()
+		// The lock this call took is released on a context of its own -- a
+		// write that failed because ctx was cancelled must not strand it --
+		// and a release that fails is reported, also after a good write.
+		defer func() {
+			if uerr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); uerr != nil {
+				if err == nil {
+					err = fmt.Errorf("message class %s written, but %s", name, strandedLockAdvice(objectURL, uerr))
+				} else {
+					err = fmt.Errorf("%w; %s", err, strandedLockAdvice(objectURL, uerr))
+				}
+			}
+		}()
 		lockHandle = lock.LockHandle
 	}
 
