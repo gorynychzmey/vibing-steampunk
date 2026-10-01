@@ -149,6 +149,13 @@ func (s *Server) handleImportStatus(ctx context.Context, request mcp.CallToolReq
 	return newToolResultJSON(logs), nil
 }
 
+// SameSystem says whether two URL/client pairs name one system, by the rule
+// the server uses to find its own .vsp.json entry (an omitted client is the
+// default client).
+func SameSystem(urlA, clientA, urlB, clientB string) bool {
+	return sameSystem(urlA, clientA, urlB, clientB)
+}
+
 // transportList reads one request, a comma-separated list, or an array.
 func transportList(v any) []string {
 	var out []string
