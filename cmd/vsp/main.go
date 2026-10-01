@@ -22,6 +22,10 @@ var (
 	Version   = "dev"
 	Commit    = "unknown"
 	BuildDate = "unknown"
+	// ReleaseRepo is the owner/name of the GitHub repository this binary is
+	// released from, set by build flags; empty means the default
+	// (oisee/vibing-steampunk).
+	ReleaseRepo = ""
 )
 
 var cfg = &mcp.Config{}
