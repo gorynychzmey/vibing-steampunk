@@ -292,9 +292,10 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 
 	// The wrapper ends every run that reaches its end in the assertion that
 	// carries the marker, so a run without one never got there. ABAP Unit says
-	// why only in a warning -- a test class above the system's risk level is
-	// "not executed", with severity "tolerable" -- and read as success that
-	// warning was the whole report of a run that never happened.
+	// why only in a warning: a test class above the system's risk level is
+	// "not executed", with severity "tolerable". That warning was the only
+	// report of a run that never happened, and because only failures were
+	// checked, the run used to be reported as a success.
 	if result.Failure == nil && len(testResult.Classes) > 0 && !anyExecResult(result.RawAlerts) && PayloadFailure(result.RawAlerts) == nil {
 		result.Failure = &ExecuteFailure{
 			Kind:  ExecuteFailureNotRun,
