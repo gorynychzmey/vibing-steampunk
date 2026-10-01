@@ -568,8 +568,14 @@ func transportEntries(args map[string]any) ([]adt.TransportEntry, error) {
 		case string:
 			e.Keys = []string{ks}
 		case []any:
-			for _, k := range ks {
-				e.Keys = append(e.Keys, fmt.Sprint(k))
+			// Strings only: a JSON number loses its leading zeroes, and a
+			// key such as 001... would then name another row.
+			for i, k := range ks {
+				s, ok := k.(string)
+				if !ok {
+					return fmt.Errorf("key %d of %s is %T, not a string; give table keys as strings", i+1, object, k)
+				}
+				e.Keys = append(e.Keys, s)
 			}
 		default:
 			return fmt.Errorf("keys of %s: a list of table keys", object)

@@ -59,7 +59,7 @@ func (c *Client) AddTransportObjects(ctx context.Context, ws *DebugWebSocketClie
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", request, err)
 	}
-	return addTransportObjects(ctx, ws, c.requestHeader, details, strings.ToUpper(c.config.Username), entries)
+	return addTransportObjects(ctx, ws, c.requestHeader, details, request, strings.ToUpper(c.config.Username), entries)
 }
 
 // headerReader reads a request's or task's E070 row as a TRWBO_REQUEST_HEADER.
@@ -92,12 +92,12 @@ func (c *Client) requestHeader(ctx context.Context, number string) (map[string]a
 	return header, nil
 }
 
-func addTransportObjects(ctx context.Context, bridge organizerBridge, readHeader headerReader, details *TransportDetails, user string, entries []TransportEntry) (*TransportEntriesResult, error) {
+func addTransportObjects(ctx context.Context, bridge organizerBridge, readHeader headerReader, details *TransportDetails, named, user string, entries []TransportEntry) (*TransportEntriesResult, error) {
 	e071, e071k, err := entryRows(entries)
 	if err != nil {
 		return nil, err
 	}
-	out := &TransportEntriesResult{Request: details.Number, Task: taskFor(details, user)}
+	out := &TransportEntriesResult{Request: details.Number, Task: targetTask(details, named, user)}
 	classified, err := classifyTask(ctx, bridge, readHeader, details, out.Task)
 	if err != nil {
 		return out, err
@@ -235,14 +235,18 @@ func (c *Client) RemoveTransportObject(ctx context.Context, ws *DebugWebSocketCl
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", request, err)
 	}
-	return removeTransportObject(ctx, ws, details, key)
+	return removeTransportObject(ctx, ws, details, request, key)
 }
 
-func removeTransportObject(ctx context.Context, bridge organizerBridge, details *TransportDetails, key TransportObjectKey) (*TransportRemoveResult, error) {
+func removeTransportObject(ctx context.Context, bridge organizerBridge, details *TransportDetails, named string, key TransportObjectKey) (*TransportRemoveResult, error) {
 	key = normalizedKey(key)
-	out := &TransportRemoveResult{Object: key, Request: details.Number, Task: holderOf(details, key)}
+	out := &TransportRemoveResult{Object: key, Request: details.Number, Task: holderIn(details, named, key)}
 	if out.Task == "" {
-		return out, fmt.Errorf("%s is not in %s", key, details.Number)
+		where := details.Number
+		if t := namedTask(details, named); t != "" {
+			where = t
+		}
+		return out, fmt.Errorf("%s is not in %s", key, where)
 	}
 	del := func() (*RFCResult, error) {
 		return bridge.CallRFC(ctx, "TRINT_DELETE_COMM_OBJECT_KEYS", map[string]any{

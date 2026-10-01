@@ -48,7 +48,7 @@ func entriesRequest() *TransportDetails {
 
 func TestAddTransportObjects_GoesToTheCallersTaskWithTableKeys(t *testing.T) {
 	bridge := &fakeOrganizer{}
-	res, err := addTransportObjects(context.Background(), bridge, noHeader, entriesRequest(), "TESTUSER", []TransportEntry{
+	res, err := addTransportObjects(context.Background(), bridge, noHeader, entriesRequest(), "", "TESTUSER", []TransportEntry{
 		{TransportObjectKey: TransportObjectKey{"limu", "rept", "zdemo"}},
 		{TransportObjectKey: TransportObjectKey{"R3TR", "TABU", "ZDEMO_CONF"}, Keys: []string{"100KEY1", "100KEY2*"}},
 	})
@@ -83,7 +83,7 @@ func TestAddTransportObjects_GoesToTheCallersTaskWithTableKeys(t *testing.T) {
 
 func TestAddTransportObjects_ReportsSAPsMessage(t *testing.T) {
 	bridge := &fakeOrganizer{result: RFCResult{Subrc: 99, Message: "Object ZDEMO is locked in request TR-X"}}
-	_, err := addTransportObjects(context.Background(), bridge, noHeader, entriesRequest(), "TESTUSER", []TransportEntry{
+	_, err := addTransportObjects(context.Background(), bridge, noHeader, entriesRequest(), "", "TESTUSER", []TransportEntry{
 		{TransportObjectKey: TransportObjectKey{"R3TR", "PROG", "ZDEMO"}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "locked in request TR-X") {
@@ -99,7 +99,7 @@ func TestAddTransportObjects_RefusesBeforeCalling(t *testing.T) {
 		"no name":            {{TransportObjectKey: TransportObjectKey{"R3TR", "PROG", ""}}},
 	} {
 		bridge := &fakeOrganizer{}
-		if _, err := addTransportObjects(context.Background(), bridge, noHeader, entriesRequest(), "TESTUSER", entries); err == nil {
+		if _, err := addTransportObjects(context.Background(), bridge, noHeader, entriesRequest(), "", "TESTUSER", entries); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 		if len(bridge.calls) != 0 {
@@ -110,7 +110,7 @@ func TestAddTransportObjects_RefusesBeforeCalling(t *testing.T) {
 
 func TestRemoveTransportObject_FromTheTaskThatHoldsIt(t *testing.T) {
 	bridge := &fakeOrganizer{}
-	res, err := removeTransportObject(context.Background(), bridge, entriesRequest(), TransportObjectKey{"r3tr", "prog", "zdemo"})
+	res, err := removeTransportObject(context.Background(), bridge, entriesRequest(), "", TransportObjectKey{"r3tr", "prog", "zdemo"})
 	if err != nil {
 		t.Fatalf("removeTransportObject: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestRemoveTransportObject_FromTheTaskThatHoldsIt(t *testing.T) {
 
 func TestRemoveTransportObject_RefusesAnEntryThatIsNotThere(t *testing.T) {
 	bridge := &fakeOrganizer{}
-	if _, err := removeTransportObject(context.Background(), bridge, entriesRequest(), TransportObjectKey{"R3TR", "PROG", "ZNOWHERE"}); err == nil {
+	if _, err := removeTransportObject(context.Background(), bridge, entriesRequest(), "", TransportObjectKey{"R3TR", "PROG", "ZNOWHERE"}); err == nil {
 		t.Fatal("accepted")
 	}
 	if len(bridge.calls) != 0 {
@@ -148,7 +148,7 @@ func TestAddTransportObjects_ClassifiesAnUnclassifiedTaskFirst(t *testing.T) {
 		return header, nil
 	}
 	bridge := &fakeOrganizer{}
-	res, err := addTransportObjects(context.Background(), bridge, read, details, "TESTUSER", []TransportEntry{
+	res, err := addTransportObjects(context.Background(), bridge, read, details, "", "TESTUSER", []TransportEntry{
 		{TransportObjectKey: TransportObjectKey{"R3TR", "PROG", "ZDEMO"}},
 	})
 	if err != nil {
@@ -173,33 +173,33 @@ func TestAddTransportObjects_ClassifiesAnUnclassifiedTaskFirst(t *testing.T) {
 func TestTransportTree_ReadsTheRequestOfATask(t *testing.T) {
 	header := `<?xml version="1.0" encoding="utf-8"?>
 <tm:root xmlns:tm="http://www.sap.com/cts/adt/tm">
-  <tm:request tm:number="DEVK900001" tm:owner="DEVELOPER" tm:desc="Demo" tm:status="D"/>
+  <tm:request tm:number="TR-EXAMPLE" tm:owner="TESTUSER" tm:desc="Demo" tm:status="D"/>
 </tm:root>`
 	full := `<?xml version="1.0" encoding="utf-8"?>
 <tm:root xmlns:tm="http://www.sap.com/cts/adt/tm">
-  <tm:request tm:number="DEVK900001" tm:owner="DEVELOPER" tm:desc="Demo" tm:status="D">
-    <tm:task tm:number="DEVK900002" tm:owner="DEVELOPER" tm:desc="Demo" tm:status="D">
+  <tm:request tm:number="TR-EXAMPLE" tm:owner="TESTUSER" tm:desc="Demo" tm:status="D">
+    <tm:task tm:number="TR-EXAMPLE-T" tm:owner="TESTUSER" tm:desc="Demo" tm:status="D">
       <tm:abap_object tm:pgmid="R3TR" tm:type="PROG" tm:name="ZDEMO"/>
     </tm:task>
   </tm:request>
 </tm:root>`
 	c, mock := newTransportTestClient(t, map[string][]string{
-		"/sap/bc/adt/cts/transportrequests/DEVK900002": {header},
-		"/sap/bc/adt/cts/transportrequests/DEVK900001": {full},
+		"/sap/bc/adt/cts/transportrequests/TR-EXAMPLE-T": {header},
+		"/sap/bc/adt/cts/transportrequests/TR-EXAMPLE": {full},
 	})
-	details, err := c.transportTree(context.Background(), "DEVK900002")
+	details, err := c.transportTree(context.Background(), "TR-EXAMPLE-T")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := holderOf(details, TransportObjectKey{PgmID: "R3TR", Object: "PROG", Name: "ZDEMO"}); got != "DEVK900002" {
-		t.Errorf("entry found in %q, want the task DEVK900002", got)
+	if got := holderOf(details, TransportObjectKey{PgmID: "R3TR", Object: "PROG", Name: "ZDEMO"}); got != "TR-EXAMPLE-T" {
+		t.Errorf("entry found in %q, want the task TR-EXAMPLE-T", got)
 	}
 	if len(mock.requests) != 2 {
 		t.Errorf("%d reads, want the task and then its request", len(mock.requests))
 	}
 
-	c, mock = newTransportTestClient(t, map[string][]string{"/sap/bc/adt/cts/transportrequests/DEVK900001": {full}})
-	if _, err := c.transportTree(context.Background(), "DEVK900001"); err != nil {
+	c, mock = newTransportTestClient(t, map[string][]string{"/sap/bc/adt/cts/transportrequests/TR-EXAMPLE": {full}})
+	if _, err := c.transportTree(context.Background(), "TR-EXAMPLE"); err != nil {
 		t.Fatal(err)
 	}
 	if len(mock.requests) != 1 {
@@ -230,7 +230,7 @@ func TestRemoveTransportObject_SortsAndCompressesADuplicate(t *testing.T) {
 		{},
 		{},
 	}}
-	res, err := removeTransportObject(context.Background(), bridge, entriesRequest(), TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
+	res, err := removeTransportObject(context.Background(), bridge, entriesRequest(), "", TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
 	if err != nil || !res.Removed {
 		t.Fatalf("removeTransportObject: %+v %v", res, err)
 	}
@@ -247,7 +247,7 @@ func TestRemoveTransportObject_SortsAndCompressesADuplicate(t *testing.T) {
 func TestRemoveTransportObject_RemovesAnEntryRecordedAsItsDeletion(t *testing.T) {
 	twice := RFCResult{Subrc: 99, Message: "Object entry exists more than once; sort and compress first"}
 	bridge := &sequenceOrganizer{results: []RFCResult{twice, {}, twice, {}, {}, {}}}
-	res, err := removeTransportObject(context.Background(), bridge, entriesRequest(), TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
+	res, err := removeTransportObject(context.Background(), bridge, entriesRequest(), "", TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
 	if err != nil || !res.Removed {
 		t.Fatalf("removeTransportObject: %+v %v", res, err)
 	}
@@ -265,8 +265,27 @@ func TestRemoveTransportObject_RemovesAnEntryRecordedAsItsDeletion(t *testing.T)
 func TestRemoveTransportObject_SaysWhenTheLockMayRemain(t *testing.T) {
 	twice := RFCResult{Subrc: 99, Message: "Object entry exists more than once; sort and compress first"}
 	bridge := &sequenceOrganizer{results: []RFCResult{twice, {}, twice, {}, {Subrc: 99, Message: "Object is locked"}}}
-	_, err := removeTransportObject(context.Background(), bridge, entriesRequest(), TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
+	_, err := removeTransportObject(context.Background(), bridge, entriesRequest(), "", TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
 	if err == nil || !strings.Contains(err.Error(), "may still hold its lock") {
 		t.Fatalf("err = %v, want the lock named", err)
+	}
+}
+
+// A task named in place of the request is the target, even when it is not
+// the caller's own; taking an entry out of a named task looks only there.
+func TestTransportEntries_HonourANamedTask(t *testing.T) {
+	bridge := &fakeOrganizer{}
+	res, err := addTransportObjects(context.Background(), bridge, noHeader, entriesRequest(), "TR-OTHER", "TESTUSER", []TransportEntry{
+		{TransportObjectKey: TransportObjectKey{"R3TR", "PROG", "ZDEMO2"}},
+	})
+	if err != nil || res.Task != "TR-OTHER" {
+		t.Fatalf("add to a named task: %+v %v", res, err)
+	}
+	if _, err := removeTransportObject(context.Background(), &sequenceOrganizer{}, entriesRequest(), "TR-MINE", TransportObjectKey{"R3TR", "PROG", "ZDEMO"}); err == nil || !strings.Contains(err.Error(), "not in TR-MINE") {
+		t.Errorf("remove from a named task that does not hold it: %v", err)
+	}
+	res2, err := removeTransportObject(context.Background(), &sequenceOrganizer{}, entriesRequest(), "TR-OTHER", TransportObjectKey{"R3TR", "PROG", "ZDEMO"})
+	if err != nil || res2.Task != "TR-OTHER" {
+		t.Errorf("remove from the named task that holds it: %+v %v", res2, err)
 	}
 }
