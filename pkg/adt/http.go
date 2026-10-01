@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 // httpTraceEnabled reports whether the VSP_HTTP_TRACE env var requests raw
@@ -144,7 +146,7 @@ type Transport struct {
 	// contextGate admits one request at a time into the stateful context, and
 	// keeps a stateless request that is allowed to end the context from
 	// racing one that is using it. contextInFlight counts the stateful
-	// requests under way or waiting (see do).
+	// requests under way or waiting (see do). Set by NewTransportWithClient.
 	contextGate     contextGate
 	contextInFlight atomic.Int32
 }
@@ -159,8 +161,9 @@ func NewTransport(cfg *Config) *Transport {
 func NewTransportWithClient(cfg *Config, client HTTPDoer) *Transport {
 	applyProxyContextIDGuardEnv(cfg)
 	t := &Transport{
-		config:     cfg,
-		httpClient: client,
+		config:      cfg,
+		httpClient:  client,
+		contextGate: newContextGate(),
 	}
 	if cfg.Cache {
 		t.cache = newResponseCache(cfg.CacheStore, cfg.CacheTTL)
@@ -1156,75 +1159,42 @@ func urlErrorOp(method string) string {
 	return method[:1] + strings.ToLower(method[1:])
 }
 
-// contextGate is a readers-writer lock whose writers stop waiting when their
-// request's context ends, and whose readers never wait at all: tryShared fails
-// while a writer holds the gate or waits for it, so readers cannot starve a
-// writer. The zero value is an open gate.
+// contextGateSlots is the gate's weight: one slot per stateless request that
+// holds it shared, all of them for a request into the context. A million
+// concurrent stateless requests on one client is out of reach.
+const contextGateSlots = 1 << 20
+
+// contextGate is a readers-writer gate over a weighted semaphore. Readers
+// never wait: tryShared takes one slot with TryAcquire, which fails while a
+// writer holds the gate or is queued for it, so readers cannot starve a
+// writer. Writers take every slot with Acquire, which queues them in arrival
+// order and gives up with their context; a writer that gives up passes the
+// turn on to the next in the queue. The zero value is not usable; see
+// newContextGate.
 type contextGate struct {
-	mu      sync.Mutex
-	shared  int
-	held    bool
-	waiting int
-	changed chan struct{} // closed when the gate is released, then replaced
+	sem *semaphore.Weighted
+}
+
+func newContextGate() contextGate {
+	return contextGate{sem: semaphore.NewWeighted(contextGateSlots)}
 }
 
 // tryShared takes the gate shared if no writer holds it or waits for it.
-func (g *contextGate) tryShared() bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.held || g.waiting > 0 {
-		return false
-	}
-	g.shared++
-	return true
-}
+func (g contextGate) tryShared() bool { return g.sem.TryAcquire(1) }
 
-func (g *contextGate) releaseShared() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.shared--
-	if g.shared == 0 {
-		g.wake()
-	}
-}
+func (g contextGate) releaseShared() { g.sem.Release(1) }
 
-// lock takes the gate exclusively, or gives up with ctx's error.
-func (g *contextGate) lock(ctx context.Context) error {
-	g.mu.Lock()
-	g.waiting++
-	for g.held || g.shared > 0 {
-		if g.changed == nil {
-			g.changed = make(chan struct{})
-		}
-		changed := g.changed
-		g.mu.Unlock()
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			g.mu.Lock()
-			g.waiting--
-			g.mu.Unlock()
-			return ctx.Err()
-		}
-		g.mu.Lock()
+// lock takes the gate exclusively, or gives up with ctx's error. A gate
+// handed over just as ctx ended is given back: the caller is not to go on.
+func (g contextGate) lock(ctx context.Context) error {
+	if err := g.sem.Acquire(ctx, contextGateSlots); err != nil {
+		return err
 	}
-	g.waiting--
-	g.held = true
-	g.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		g.sem.Release(contextGateSlots)
+		return err
+	}
 	return nil
 }
 
-func (g *contextGate) unlock() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.held = false
-	g.wake()
-}
-
-// wake lets every waiter look at the gate again. g.mu is held.
-func (g *contextGate) wake() {
-	if g.changed != nil {
-		close(g.changed)
-		g.changed = nil
-	}
-}
+func (g contextGate) unlock() { g.sem.Release(contextGateSlots) }

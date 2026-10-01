@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -279,4 +281,244 @@ func TestLockContext_AStuckStatefulRequestHoldsUpNobody(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("stateful request with an expired context: got %v, want %v", err, context.DeadlineExceeded)
 	}
+}
+
+// waitQueued returns once a writer is queued for (or holds) g: from then on
+// tryShared fails.
+func waitQueued(t *testing.T, g contextGate) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for g.tryShared() {
+		g.releaseShared()
+		if time.Now().After(deadline) {
+			t.Fatal("the writer never queued for the gate")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// lockAsync starts g.lock(ctx) and returns its result channel.
+func lockAsync(g contextGate, ctx context.Context) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- g.lock(ctx) }()
+	return done
+}
+
+// A writer that gives up while queued must pass the turn on: the writer
+// behind it still gets the gate once it is free.
+func TestContextGate_ACancelledWriterDoesNotStrandTheNext(t *testing.T) {
+	g := newContextGate()
+	if !g.tryShared() {
+		t.Fatal("a fresh gate refused a reader")
+	}
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	first := lockAsync(g, ctx1)
+	waitQueued(t, g)
+	second := lockAsync(g, context.Background())
+	time.Sleep(10 * time.Millisecond) // let the second writer queue behind the first
+
+	cancel1()
+	select {
+	case err := <-first:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled writer: got %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancelled writer is still waiting")
+	}
+
+	g.releaseShared()
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatalf("second writer: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second writer never got the gate after the first gave up")
+	}
+	g.unlock()
+}
+
+// Writers get the gate in the order they asked for it.
+func TestContextGate_WritersAreServedInArrivalOrder(t *testing.T) {
+	g := newContextGate()
+	if err := g.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var order []int
+	var wg sync.WaitGroup
+	for i := 1; i <= 3; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := g.lock(context.Background()); err != nil {
+				t.Errorf("writer %d: %v", i, err)
+				return
+			}
+			mu.Lock()
+			order = append(order, i)
+			mu.Unlock()
+			g.unlock()
+		}(i)
+		// Each writer has to be in the queue before the next one starts.
+		time.Sleep(20 * time.Millisecond)
+	}
+	g.unlock()
+	wg.Wait()
+
+	if fmt.Sprint(order) != "[1 2 3]" {
+		t.Errorf("writers acquired in order %v, want [1 2 3]", order)
+	}
+}
+
+// A stateless request that arrives while a request into the context waits
+// for the gate does not wait behind it: it goes isolated, without the
+// context's sap-contextid.
+func TestLockContext_AStatelessRequestWhileAWriterWaitsGoesIsolated(t *testing.T) {
+	var mu sync.Mutex
+	var presented []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-csrf-token", "TOKEN")
+		if r.Header.Get("X-sap-adt-sessiontype") == "stateful" {
+			http.SetCookie(w, &http.Cookie{Name: "sap-contextid", Value: "CTX-1", Path: "/"})
+		}
+		if r.Header.Get("X-sap-adt-sessiontype") == "stateless" {
+			v := ""
+			if c, err := r.Cookie("sap-contextid"); err == nil {
+				v = c.Value
+			}
+			mu.Lock()
+			presented = append(presented, v)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, "TESTUSER", "pw")
+	tr := c.transport
+
+	// Open the context: the jar learns sap-contextid.
+	if _, err := tr.Request(context.Background(), "/open", &RequestOptions{Stateful: true}); err != nil {
+		t.Fatalf("stateful request: %v", err)
+	}
+
+	// An earlier stateless request holds the gate shared, and a request into
+	// the context -- unmarked, so the in-flight count stays at zero -- queues.
+	if !tr.contextGate.tryShared() {
+		t.Fatal("the gate is not free")
+	}
+	writer := make(chan error, 1)
+	go func() {
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/probe", nil)
+		resp, err := tr.do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		writer <- err
+	}()
+	waitQueued(t, tr.contextGate)
+	if n := tr.contextInFlight.Load(); n != 0 {
+		t.Fatalf("in-flight count %d: the test would not exercise the gate", n)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr.Request(context.Background(), "/sap/bc/adt/repository/informationsystem/search", nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("stateless request: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stateless request waited behind the queued writer")
+	}
+
+	tr.contextGate.releaseShared()
+	if err := <-writer; err != nil {
+		t.Fatalf("queued writer: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(presented) == 0 {
+		t.Fatal("the stateless request never reached the server")
+	}
+	if v := presented[len(presented)-1]; v != "" {
+		t.Errorf("the stateless request carried sap-contextid=%q; it should have gone isolated", v)
+	}
+}
+
+// Readers and writers with short deadlines hammer the gate: a writer is never
+// in with anyone else, and a reader never in with a writer.
+func TestContextGate_StressNoOverlap(t *testing.T) {
+	g := newContextGate()
+	var readers, writers atomic.Int32
+	var overlaps, wrote, read atomic.Int64
+	stop := time.Now().Add(time.Second)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(seed int64) {
+			defer wg.Done()
+			rng := rand.New(rand.NewSource(seed))
+			for time.Now().Before(stop) {
+				// Pause between turns: writers are preferred, and with no gaps
+				// a queue of them would keep every reader out.
+				time.Sleep(time.Duration(rng.Intn(300)) * time.Microsecond)
+				if rng.Intn(4) == 0 {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Duration(rng.Intn(500))*time.Microsecond)
+					err := g.lock(ctx)
+					if err != nil {
+						cancel()
+						if !errors.Is(err, context.DeadlineExceeded) {
+							t.Errorf("writer: unexpected error %v", err)
+						}
+						continue
+					}
+					if writers.Add(1) != 1 || readers.Load() != 0 {
+						overlaps.Add(1)
+					}
+					time.Sleep(time.Duration(rng.Intn(100)) * time.Microsecond)
+					writers.Add(-1)
+					g.unlock()
+					cancel()
+					wrote.Add(1)
+					continue
+				}
+				if !g.tryShared() {
+					continue
+				}
+				readers.Add(1)
+				if writers.Load() != 0 {
+					overlaps.Add(1)
+				}
+				time.Sleep(time.Duration(rng.Intn(100)) * time.Microsecond)
+				readers.Add(-1)
+				g.releaseShared()
+				read.Add(1)
+			}
+		}(int64(i))
+	}
+	wg.Wait()
+
+	if n := overlaps.Load(); n != 0 {
+		t.Errorf("%d overlaps between a writer and anyone else", n)
+	}
+	if wrote.Load() == 0 || read.Load() == 0 {
+		t.Errorf("the mix never exercised both sides: %d writes, %d reads", wrote.Load(), read.Load())
+	}
+	// Nothing leaked: the gate is free again.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := g.lock(ctx); err != nil {
+		t.Fatalf("the gate was left held: %v", err)
+	}
+	g.unlock()
+	t.Logf("%d writes, %d reads", wrote.Load(), read.Load())
 }
