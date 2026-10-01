@@ -123,13 +123,13 @@ func (c *Client) runTempReport(ctx context.Context, prefix string, source func(p
 	if err != nil {
 		return out, fmt.Errorf("locking the temporary report %s: %w", prog, err)
 	}
-	if err := c.UpdateSource(ctx, objectURL+"/source/main", source(prog), lock.LockHandle, ""); err != nil {
+	if err = c.UpdateSource(ctx, objectURL+"/source/main", source(prog), lock.LockHandle, ""); err != nil {
 		if uerr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); uerr != nil {
 			out.Warnings = append(out.Warnings, strandedLockAdvice(objectURL, uerr))
 		}
 		return out, fmt.Errorf("writing the temporary report %s: %w", prog, err)
 	}
-	if err := c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
+	if err = c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
 		return out, fmt.Errorf("unlocking the temporary report %s: %w", prog, err)
 	}
 	activation, err := c.Activate(ctx, objectURL, prog)

@@ -9,9 +9,10 @@ import (
 	"time"
 
 	"github.com/oisee/open-rfc-go/rfc"
+	"github.com/spf13/cobra"
+
 	"github.com/oisee/vibing-steampunk/pkg/config"
 	"github.com/oisee/vibing-steampunk/pkg/saprfc"
-	"github.com/spf13/cobra"
 )
 
 var rfcCmd = &cobra.Command{

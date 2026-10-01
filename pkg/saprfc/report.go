@@ -108,8 +108,8 @@ func RunReportWith(ctx context.Context, c *rfc.Client, r ReportRequest) (*JobRun
 		if err != nil {
 			return fmt.Errorf("BAPI_XBP_JOB_OPEN: %w", err)
 		}
-		if err := bapiError("BAPI_XBP_JOB_OPEN", opened.Get("RETURN")); err != nil {
-			return err
+		if berr := bapiError("BAPI_XBP_JOB_OPEN", opened.Get("RETURN")); berr != nil {
+			return berr
 		}
 		run.JobCount = strings.TrimSpace(fmt.Sprint(opened.Get("JOBCOUNT")))
 
@@ -129,8 +129,8 @@ func RunReportWith(ctx context.Context, c *rfc.Client, r ReportRequest) (*JobRun
 		if err != nil {
 			return fmt.Errorf("BAPI_XBP_JOB_ADD_ABAP_STEP: %w", err)
 		}
-		if err := bapiError("BAPI_XBP_JOB_ADD_ABAP_STEP", added.Get("RETURN")); err != nil {
-			return err
+		if berr := bapiError("BAPI_XBP_JOB_ADD_ABAP_STEP", added.Get("RETURN")); berr != nil {
+			return berr
 		}
 
 		server, err := applicationServer(ctx, s)
@@ -144,8 +144,8 @@ func RunReportWith(ctx context.Context, c *rfc.Client, r ReportRequest) (*JobRun
 		if err != nil {
 			return fmt.Errorf("BAPI_XBP_JOB_START_ASAP: %w", err)
 		}
-		if err := bapiError("BAPI_XBP_JOB_START_ASAP", start.Get("RETURN")); err != nil {
-			return err
+		if berr := bapiError("BAPI_XBP_JOB_START_ASAP", start.Get("RETURN")); berr != nil {
+			return berr
 		}
 		run.Started = true
 		return nil
