@@ -9,7 +9,9 @@ import (
 // allow_transport_import belongs to the system it is written for. A server
 // without -s / SAP_SYSTEM takes it from the entry whose URL and client are its
 // own, never from the default entry: pointed at another system by SAP_URL, it
-// must not borrow the default system's permission to import.
+// must not borrow the default system's permission to import. A named entry
+// grants it only when its URL and client are the server's too, since in server
+// mode -s / SAP_SYSTEM names the entry while SAP_URL picks the system.
 func TestSystemAllowsImport_OnlyTheServersOwnEntry(t *testing.T) {
 	dir := t.TempDir()
 	const vspJSON = `{
@@ -33,7 +35,11 @@ func TestSystemAllowsImport_OnlyTheServersOwnEntry(t *testing.T) {
 		name, system, url, client string
 		want                      bool
 	}{
-		{"named entry", "dev", "", "", true},
+		{"named entry", "dev", "https://dev.example:44300", "100", true},
+		{"named entry with the switch, SAP_URL elsewhere", "dev", "https://prd.example:44300", "100", false},
+		{"named entry with the switch, other client", "dev", "https://dev.example:44300", "200", false},
+		{"named entry without a URL", "bare", "https://dev.example:44300", "100", false},
+		{"named entry not in .vsp.json", "prd", "https://prd.example:44300", "100", false},
 		{"named entry without the switch", "qas", "https://dev.example:44300", "100", false},
 		{"URL and client match the default entry", "", "https://DEV.example:44300/", "100", true},
 		{"SAP_URL names another system", "", "https://qas.example:44300", "100", false},

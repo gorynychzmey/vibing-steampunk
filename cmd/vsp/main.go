@@ -874,9 +874,11 @@ func main() {
 // systemAllowsImport reads allow_transport_import of this server's own
 // .vsp.json entry: the one named by -s / SAP_SYSTEM, otherwise the one entry
 // whose URL and client are the server's (as ownSystem in internal/mcp finds
-// it). There is no fallback to the default entry: a server pointed at another
-// system by SAP_URL must not borrow the default system's permission to
-// import, and an entry without a URL names no system to import into.
+// it). Either way the entry's URL and client must be the server's: in server
+// mode -s / SAP_SYSTEM only names the entry and SAP_URL picks the system, so
+// SAP_SYSTEM=qas with SAP_URL pointing at production must not import into
+// production on qas's switch. There is no fallback to the default entry, and
+// an entry without a URL names no system to import into.
 // The server's URL and client are those resolveConfig has settled in cfg.
 func systemAllowsImport(name string) bool {
 	systems, _, err := config.LoadSystems()
@@ -891,7 +893,9 @@ func ownSystemAllowsImport(systems *config.SystemsConfig, name, baseURL, client 
 		return false
 	}
 	if name != "" {
-		return systems.Systems[name].AllowTransportImport
+		sys, ok := systems.Systems[name]
+		return ok && sys.AllowTransportImport && sys.URL != "" &&
+			mcp.SameSystem(sys.URL, sys.Client, baseURL, client)
 	}
 	allows, matches := false, 0
 	for _, sys := range systems.Systems {
