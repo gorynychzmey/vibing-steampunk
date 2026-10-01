@@ -446,6 +446,9 @@ func TestSafetyConfig_CheckTransportImport(t *testing.T) {
 		{"read-only", SafetyConfig{AllowTransportImport: true, ReadOnly: true}, []string{"A4HK900001"}, "read-only"},
 		{"transport read-only", SafetyConfig{AllowTransportImport: true, TransportReadOnly: true}, []string{"A4HK900001"}, "transport read-only"},
 		{"in allowed transports", SafetyConfig{AllowTransportImport: true, AllowedTransports: []string{"A4HK*"}}, []string{"a4hk900001"}, ""},
+		{"workflow ops disallowed", SafetyConfig{AllowTransportImport: true, DisallowedOps: "W"}, []string{"A4HK900001"}, "TransportImport"},
+		{"workflow ops not in allowed ops", SafetyConfig{AllowTransportImport: true, AllowedOps: "RSQ"}, []string{"A4HK900001"}, "TransportImport"},
+		{"workflow ops allowed", SafetyConfig{AllowTransportImport: true, AllowedOps: "RW"}, []string{"A4HK900001"}, ""},
 		{"one outside allowed transports", SafetyConfig{AllowTransportImport: true, AllowedTransports: []string{"A4HK*"}}, []string{"A4HK900001", "DEVK900002"}, "DEVK900002"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

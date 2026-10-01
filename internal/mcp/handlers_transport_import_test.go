@@ -59,6 +59,8 @@ func TestHandleImportTransport_FailsClosedUnderTheSafetySwitches(t *testing.T) {
 		{"read-only", Config{ReadOnly: true}, "read-only"},
 		{"transport read-only", Config{TransportReadOnly: true}, "transport read-only"},
 		{"outside allowed transports", Config{AllowedTransports: []string{"A4HK*"}}, "TR-EXAMPLE"},
+		{"workflow ops disallowed", Config{DisallowedOps: "W"}, "TransportImport"},
+		{"workflow ops not in allowed ops", Config{AllowedOps: "RSQ"}, "TransportImport"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := tc.cfg

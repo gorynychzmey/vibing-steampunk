@@ -311,21 +311,31 @@ func (s *SafetyConfig) CheckTransport(transport, opName string, isWrite bool) er
 // CheckTransportImport returns an error unless importing these requests into
 // the connected system is allowed. The import needs its own opt-in
 // (AllowTransportImport), and it fails closed under every switch that limits
-// changes: ReadOnly, TransportReadOnly, and AllowedTransports for each request.
+// changes: ReadOnly, TransportReadOnly, AllowedOps/DisallowedOps, and
+// AllowedTransports for each request.
+//
+// For AllowedOps/DisallowedOps the import is a workflow operation (W), as
+// ExecuteABAP and an RFC call are: the import is an RFC call to
+// CTS_API_IMPORT_CHANGE_REQUEST. It is not checked as a transport operation
+// (X), since X also requires EnableTransports, and the import has its own
+// opt-in instead of --enable-transports.
 func (s *SafetyConfig) CheckTransportImport(requests []string) error {
 	if !s.AllowTransportImport {
 		return fmt.Errorf("importing requests is off for this system; enable it with allow_transport_import " +
 			"in .vsp.json, --allow-transport-import or SAP_ALLOW_TRANSPORT_IMPORT=true")
 	}
 	if s.ReadOnly {
-		return fmt.Errorf("importing requests is blocked: read-only mode is enabled (an import changes the system)")
+		return fmt.Errorf("transport import is blocked: read-only mode enabled")
 	}
 	if s.TransportReadOnly {
-		return fmt.Errorf("importing requests is blocked: transport read-only mode is enabled")
+		return fmt.Errorf("transport import is blocked: transport read-only mode enabled")
+	}
+	if err := s.CheckOperation(OpWorkflow, "TransportImport"); err != nil {
+		return err
 	}
 	for _, r := range requests {
 		if !s.isTransportInWhitelist(r) {
-			return fmt.Errorf("importing request '%s' is blocked by safety configuration (allowed: %v)",
+			return fmt.Errorf("transport import of '%s' is blocked by safety configuration (allowed: %v)",
 				r, s.AllowedTransports)
 		}
 	}
