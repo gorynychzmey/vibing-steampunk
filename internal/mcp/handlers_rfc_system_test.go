@@ -178,3 +178,33 @@ func TestSameSystem_OmittedClientIsTheDefault(t *testing.T) {
 		}
 	}
 }
+
+// A cookie or SSO server has no logon of its own. It keeps the RFC logon from
+// SAP_USER/SAP_PASSWORD when SAP_URL and SAP_CLIENT name its system -- and only
+// then, so a .env of one system does not log a server on another one in.
+func TestRFCDestination_ACookieServerTakesTheEnvLogonOfItsOwnSystemOnly(t *testing.T) {
+	cookieServer := func(t *testing.T, envURL, envClient string) *Server {
+		s := serverFor(t, "https://prodsys-a.example:44300", "100", "")
+		s.config.Username, s.config.Password = "", ""
+		t.Setenv("SAP_URL", envURL)
+		t.Setenv("SAP_CLIENT", envClient)
+		return s
+	}
+
+	dest, err := cookieServer(t, "https://prodsys-a.example:44300/", "100").rfcDestination(map[string]any{})
+	if err != nil {
+		t.Fatalf("a cookie server lost its RFC logon: %v", err)
+	}
+	if dest.User != "TESTUSER" || dest.Password != "test-secret" {
+		t.Errorf("logon = %q/%q, want SAP_USER/SAP_PASSWORD", dest.User, dest.Password)
+	}
+
+	for _, other := range []struct{ url, client string }{
+		{"https://dev.example.local:44300", "100"},
+		{"https://prodsys-a.example:44300", "200"},
+	} {
+		if dest, err := cookieServer(t, other.url, other.client).rfcDestination(map[string]any{}); err == nil {
+			t.Errorf("SAP_URL=%s SAP_CLIENT=%s: a cookie server on another system logged on as %q", other.url, other.client, dest.User)
+		}
+	}
+}

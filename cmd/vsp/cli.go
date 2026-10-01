@@ -3,16 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/oisee/vibing-steampunk/pkg/cache"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/oisee/vibing-steampunk/pkg/cache"
-
-	"github.com/spf13/cobra"
-
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/config"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -59,9 +58,9 @@ type systemParams struct {
 	ReadOnly        bool
 	AllowedPackages []string
 
-	// Transport safety. The command line reaches these only through the system
-	// config or the environment; the equivalent flags live on the root command
-	// and are rejected by every subcommand.
+	// Transport safety. allow-transportable-edits can be set explicitly on a
+	// CLI subcommand; the remaining settings currently come from system config
+	// or the environment.
 	EnableTransports        bool
 	TransportReadOnly       bool
 	AllowedTransports       []string
@@ -121,6 +120,11 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 			fmt.Fprintf(os.Stderr, "[DEBUG] URL: %s, User: %s\n", sys.URL, sys.User)
 		}
 
+		allowTransportableEdits, err := resolveAllowTransportableEdits(cmd, sys.AllowTransportableEdits)
+		if err != nil {
+			return nil, err
+		}
+
 		return &systemParams{
 			Name:               effectiveName,
 			URL:                sys.URL,
@@ -140,7 +144,7 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 			EnableTransports:        sys.EnableTransports || envFlag("SAP_ENABLE_TRANSPORTS"),
 			TransportReadOnly:       sys.TransportReadOnly || envFlag("SAP_TRANSPORT_READ_ONLY"),
 			AllowedTransports:       firstNonEmptyList(sys.AllowedTransports, splitList(os.Getenv("SAP_ALLOWED_TRANSPORTS"))),
-			AllowTransportableEdits: sys.AllowTransportableEdits || envFlag("SAP_ALLOW_TRANSPORTABLE_EDITS"),
+			AllowTransportableEdits: allowTransportableEdits,
 			AllowTransportImport:    sys.AllowTransportImport || envFlag("SAP_ALLOW_TRANSPORT_IMPORT"),
 			TransportChoice:         firstNonEmpty(sys.TransportChoice, os.Getenv("SAP_TRANSPORT_CHOICE")),
 			BlockFreeSQL:            sys.BlockFreeSQL || envFlag("SAP_BLOCK_FREE_SQL"),
@@ -167,6 +171,11 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 		cachePath = ".vsp-cache/default.db"
 	}
 
+	allowTransportableEdits, err := resolveAllowTransportableEdits(cmd, false)
+	if err != nil {
+		return nil, err
+	}
+
 	return &systemParams{
 		URL:                url,
 		User:               user,
@@ -177,9 +186,52 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 		TransportAttribute: resolveTransportAttributeFromEnv(),
 		ReadOnly:           strings.EqualFold(os.Getenv("SAP_READ_ONLY"), "true"),
 		AllowedPackages:    splitList(os.Getenv("SAP_ALLOWED_PACKAGES")),
-		Cache:              cacheEnabled,
-		CachePath:          cachePath,
+		// The transport settings travel with the opt-in: without the
+		// allowlist, SAP_ALLOW_TRANSPORTABLE_EDITS=true would accept any
+		// transport in this mode.
+		EnableTransports:        envFlag("SAP_ENABLE_TRANSPORTS"),
+		TransportReadOnly:       envFlag("SAP_TRANSPORT_READ_ONLY"),
+		AllowedTransports:       splitList(os.Getenv("SAP_ALLOWED_TRANSPORTS")),
+		AllowTransportableEdits: allowTransportableEdits,
+		TransportChoice:         os.Getenv("SAP_TRANSPORT_CHOICE"),
+		BlockFreeSQL:            envFlag("SAP_BLOCK_FREE_SQL"),
+		Cache:                   cacheEnabled,
+		CachePath:               cachePath,
 	}, nil
+}
+
+// resolveAllowTransportableEdits keeps this high-impact opt-in distinct from
+// the older boolean config merges. A changed Cobra flag must retain false so a
+// caller can explicitly disable an inherited SAP_ALLOW_TRANSPORTABLE_EDITS=true
+// value. Environment values are parsed strictly rather than silently treating a
+// typo as false. The default remains false.
+//
+// Priority: explicit CLI flag > SAP_ALLOW_TRANSPORTABLE_EDITS > system config >
+// default false.
+func resolveAllowTransportableEdits(cmd *cobra.Command, configured bool) (bool, error) {
+	// A command built without the root's persistent flags (tests, embedded
+	// callers) has no flag to consult; the environment and config still apply.
+	flag := cmd.Flags().Lookup("allow-transportable-edits")
+	if flag != nil && flag.Changed {
+		value, err := cmd.Flags().GetBool("allow-transportable-edits")
+		if err != nil {
+			return false, fmt.Errorf("read --allow-transportable-edits: %w", err)
+		}
+		return value, nil
+	}
+
+	raw, set := os.LookupEnv("SAP_ALLOW_TRANSPORTABLE_EDITS")
+	if !set || strings.TrimSpace(raw) == "" {
+		return configured, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true", "1", "yes", "on":
+		return true, nil
+	case "false", "0", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("SAP_ALLOW_TRANSPORTABLE_EDITS must be true or false, got %q", raw)
+	}
 }
 
 func resolveTransportAttributeFromEnv() string {
@@ -343,11 +395,22 @@ func buildClient(params *systemParams) (*adt.Client, error) {
 
 	// Use cookie auth if available
 	if params.CookieFile != "" {
-		cookies, err := adt.LoadCookiesFromFile(params.CookieFile)
+		cookieFile, err := filepath.Abs(params.CookieFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load cookies from %s: %w", params.CookieFile, err)
+			return nil, fmt.Errorf("resolving cookie file path: %w", err)
 		}
-		opts = append(opts, adt.WithCookies(cookies))
+		cookies, err := adt.LoadCookiesFromFile(cookieFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load cookies from %s: %w", cookieFile, err)
+		}
+		if len(cookies) == 0 {
+			return nil, fmt.Errorf("no cookies found in file: %s", cookieFile)
+		}
+		reauth, err := adt.NewCookieFileReauthFunc(cookieFile)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, adt.WithCookies(cookies), adt.WithReauthFunc(reauth), adt.WithReadOnlyReauth())
 		return adt.NewClient(params.URL, "", "", opts...), nil
 	}
 	if params.CookieString != "" {
