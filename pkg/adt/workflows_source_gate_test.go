@@ -23,6 +23,14 @@ func TestWriteSourceGate_UpdateWithAllowedPackages(t *testing.T) {
 		t.Errorf("a create into a package outside the list was not refused: %v", err)
 	}
 
+	// Package is create-only metadata: a stale one on an update, or on an
+	// upsert (whose create path gates the package itself), refuses nothing here.
+	for _, mode := range []WriteSourceMode{WriteModeUpdate, WriteModeUpsert} {
+		if err := c.writeSourceGate(&WriteSourceOptions{Mode: mode, Package: "YOTHER"}); err != nil {
+			t.Errorf("%s with a stale package was refused before its object was looked at: %v", mode, err)
+		}
+	}
+
 	cfg.Safety.ReadOnly = true
 	if err := c.writeSourceGate(&WriteSourceOptions{Mode: WriteModeUpdate}); err == nil {
 		t.Error("read-only mode did not refuse")

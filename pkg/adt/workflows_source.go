@@ -206,7 +206,10 @@ func WriteSourceResultError(result *WriteSourceResult) error {
 }
 
 // writeSourceGate is WriteSource's early rejection: operation type,
-// transportable edits, and the package when the caller names one (create).
+// transportable edits, and the package of an explicit create. Package is
+// create-only metadata; on an update -- explicit, or an upsert that finds
+// the object -- a stale one must not refuse an allowed object, and an
+// upsert that turns into a create is gated by the create path itself.
 //
 // The package of an existing object is deliberately not resolved here. Every
 // update path -- WriteProgram, WriteClass, WriteFunctionModule, the INTF and
@@ -219,7 +222,7 @@ func (c *Client) writeSourceGate(opts *WriteSourceOptions) error {
 	if err := c.checkSafety(OpWorkflow, "WriteSource"); err != nil {
 		return err
 	}
-	if opts.Package != "" {
+	if opts.Package != "" && opts.Mode == WriteModeCreate {
 		if err := c.checkPackageSafety(opts.Package); err != nil {
 			return err
 		}
