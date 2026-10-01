@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
 
@@ -44,9 +45,9 @@ func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallTool
 		return newToolResultError(fmt.Sprintf("importing needs classic RFC to this system: %v", err)), nil
 	}
 	run := func(ctx context.Context) (*saprfc.ImportResult, error) {
-		c, err := saprfc.OpenWithTimeout(ctx, dest, timeout)
-		if err != nil {
-			return nil, fmt.Errorf("RFC logon to %s:%d failed: %w", dest.Host, dest.Port, err)
+		c, oerr := saprfc.OpenWithTimeout(ctx, dest, timeout)
+		if oerr != nil {
+			return nil, fmt.Errorf("RFC logon to %s:%d failed: %w", dest.Host, dest.Port, oerr)
 		}
 		defer func() { _ = c.Close(context.Background()) }()
 		return saprfc.ImportRequests(ctx, c, requests, client)

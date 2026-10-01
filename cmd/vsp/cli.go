@@ -3,14 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/oisee/vibing-steampunk/pkg/cache"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/oisee/vibing-steampunk/pkg/cache"
+
+	"github.com/spf13/cobra"
+
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/config"
-	"github.com/spf13/cobra"
 )
 
 var (
