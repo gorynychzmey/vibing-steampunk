@@ -2,9 +2,10 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"os"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -12,25 +13,58 @@ import (
 // fakeGateway accepts TCP connections on loopback, counts them and hangs up at
 // once. It is not an RFC server: it only shows whether an op got as far as
 // dialling the gateway.
+//
+// dials is a barrier, not a wait: it dials a probe of its own and returns, once
+// the listener has accepted the probe, how many other connections came before
+// it. The kernel hands out connections in the order they were established, so
+// a dial made before dials was called has been counted by the time it returns;
+// there is no window to guess.
 func fakeGateway(t *testing.T) (port int, dials func() int64) {
 	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
-	var n atomic.Int64
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done); _ = ln.Close() })
+	accepted := make(chan string)
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			n.Add(1)
+			from := conn.RemoteAddr().String()
 			_ = conn.Close()
+			select {
+			case accepted <- from:
+			case <-done:
+				return
+			}
 		}
 	}()
-	return ln.Addr().(*net.TCPAddr).Port, n.Load
+	var n int64
+	return ln.Addr().(*net.TCPAddr).Port, func() int64 {
+		t.Helper()
+		probe, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatalf("probe dial: %v", err)
+		}
+		defer probe.Close()
+		self := probe.LocalAddr().String()
+		timeout := time.After(5 * time.Second)
+		for {
+			select {
+			case from := <-accepted:
+				if from == self {
+					return n
+				}
+				n++
+			case <-timeout:
+				t.Fatal("the gateway never accepted the probe")
+			}
+		}
+	}
 }
 
 func rfcTestServer(t *testing.T, readOnly bool) *Server {
@@ -48,21 +82,22 @@ func rfcTestServer(t *testing.T, readOnly bool) *Server {
 	})
 }
 
-func rfcParams(port int, extra map[string]any) map[string]any {
-	p := map[string]any{"host": "127.0.0.1", "sysnr": "00", "port": float64(port)}
+// rfcParams points this server's own gateway at the fake one, through a
+// .vsp.json entry for its URL and client in the test's working directory, and
+// returns the call's params. A per-call host/sysnr/port override would be
+// refused: the configured credentials only go to the server's own gateway.
+func rfcParams(t *testing.T, port int, extra map[string]any) map[string]any {
+	t.Helper()
+	cfg := fmt.Sprintf(`{"systems": {"own": {"url": "http://127.0.0.1:1", "client": "001",
+	  "rfc_host": "127.0.0.1", "rfc_sysnr": "00", "rfc_port": %d}}}`, port)
+	if err := os.WriteFile(".vsp.json", []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := map[string]any{}
 	for k, v := range extra {
 		p[k] = v
 	}
 	return p
-}
-
-// waitDials gives a dial that already happened time to reach Accept.
-func waitDials(dials func() int64, want int64, within time.Duration) int64 {
-	deadline := time.Now().Add(within)
-	for dials() < want && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	return dials()
 }
 
 func TestRFCReadOnly_CallRefusedBeforeLogon(t *testing.T) {
@@ -77,14 +112,14 @@ func TestRFCReadOnly_CallRefusedBeforeLogon(t *testing.T) {
 			port, dials := fakeGateway(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, handled, err := s.routeRFCAction(ctx, "rfc", "Z_DOUBLE", "", rfcParams(port, extra))
+			_, handled, err := s.routeRFCAction(ctx, "rfc", "Z_DOUBLE", "", rfcParams(t, port, extra))
 			if !handled {
 				t.Fatal("rfc action not handled")
 			}
 			if err == nil || !strings.Contains(err.Error(), "blocked by safety configuration") {
 				t.Fatalf("want a safety refusal, got %v", err)
 			}
-			if n := waitDials(dials, 1, 200*time.Millisecond); n != 0 {
+			if n := dials(); n != 0 {
 				t.Errorf("refused call still dialled the gateway %d time(s)", n)
 			}
 		})
@@ -110,14 +145,14 @@ func TestRFCReadOnly_ReadOpsStillReachGateway(t *testing.T) {
 			port, dials := fakeGateway(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, handled, err := s.routeRFCAction(ctx, "rfc", tc.target, "", rfcParams(port, tc.extra))
+			_, handled, err := s.routeRFCAction(ctx, "rfc", tc.target, "", rfcParams(t, port, tc.extra))
 			if !handled {
 				t.Fatal("rfc action not handled")
 			}
 			if err != nil && strings.Contains(err.Error(), "blocked") {
 				t.Fatalf("read op refused under --read-only: %v", err)
 			}
-			if waitDials(dials, 1, 2*time.Second) == 0 {
+			if dials() == 0 {
 				t.Errorf("read op never reached the gateway (err %v)", err)
 			}
 		})
@@ -129,11 +164,11 @@ func TestRFCWritable_CallReachesGateway(t *testing.T) {
 	port, dials := fakeGateway(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _, err := s.routeRFCAction(ctx, "rfc", "Z_DOUBLE", "", rfcParams(port, map[string]any{"op": "call"}))
+	_, _, err := s.routeRFCAction(ctx, "rfc", "Z_DOUBLE", "", rfcParams(t, port, map[string]any{"op": "call"}))
 	if err != nil && strings.Contains(err.Error(), "blocked") {
 		t.Fatalf("call refused without --read-only: %v", err)
 	}
-	if waitDials(dials, 1, 2*time.Second) == 0 {
+	if dials() == 0 {
 		t.Errorf("call never reached the gateway (err %v)", err)
 	}
 }
