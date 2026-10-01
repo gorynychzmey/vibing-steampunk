@@ -43,6 +43,14 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 	params.Set("_action", "LOCK")
 	params.Set("accessMode", accessMode)
 
+	// The window opens when the handle is recorded, after the response is in.
+	// Until then, count the LOCK as a stateful request under way, so no
+	// stateless request ends the context between the two (see Transport.do).
+	if c.transport != nil {
+		c.transport.contextInFlight.Add(1)
+		defer c.transport.contextInFlight.Add(-1)
+	}
+
 	resp, err := c.transport.Request(ctx, objectURL, &RequestOptions{
 		Method:   http.MethodPost,
 		Query:    params,
@@ -164,6 +172,15 @@ func (c *Client) UnlockObject(ctx context.Context, objectURL string, lockHandle 
 		Stateful: true, // Must match lock session (issue #88)
 	})
 	if err != nil {
+		// Under cookie-file recovery, an expired session answering the
+		// unlock means the session holding the lock is gone, and the enqueue
+		// with it. Keeping the handle would refuse every later recovery until
+		// the entry ages out.
+		var apiErr *APIError
+		if c.config != nil && c.config.ReauthReadOnly && errors.As(err, &apiErr) &&
+			(apiErr.IsSessionExpired() || apiErr.StatusCode == http.StatusUnauthorized) {
+			c.noteLockClosed(lockHandle)
+		}
 		return fmt.Errorf("unlocking object: %w", err)
 	}
 

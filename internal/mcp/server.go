@@ -115,12 +115,22 @@ type Config struct {
 	// Graph / co-change configuration
 	TransportAttribute string // E070A attribute name for CR-level co-change aggregation
 
+	// SystemName is this server's system in .vsp.json (-s / SAP_SYSTEM). Empty
+	// finds it by URL and client; its per-system settings (the RFC gateway and
+	// credentials) apply to this server only.
+	SystemName string
+
 	// Debugger configuration
 	TerminalID string // SAP GUI terminal ID for cross-tool breakpoint sharing
 
 	// ReauthFunc is called on 401 to re-authenticate (e.g., re-run SAML dance).
 	// Returns fresh cookies. Passed through to adt.Config.
 	ReauthFunc func(ctx context.Context) (map[string]string, error)
+
+	// ReauthReadOnly limits the re-auth function to unlocked GET/HEAD reads.
+	// Set for credential sources another process refreshes (--cookie-file):
+	// writes and lock windows must fail instead of replaying on a new session.
+	ReauthReadOnly bool
 
 	// ReauthTimeout caps one re-authentication attempt. Zero uses the client
 	// default, which assumes the flow runs unattended; a browser sign-in that
@@ -161,6 +171,9 @@ func NewServer(cfg *Config) *Server {
 	}
 	if cfg.ReauthFunc != nil {
 		opts = append(opts, adt.WithReauthFunc(cfg.ReauthFunc))
+		if cfg.ReauthReadOnly {
+			opts = append(opts, adt.WithReadOnlyReauth())
+		}
 	}
 	if cfg.ReauthTimeout > 0 {
 		opts = append(opts, adt.WithReauthTimeout(cfg.ReauthTimeout))
