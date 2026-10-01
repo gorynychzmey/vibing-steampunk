@@ -92,6 +92,9 @@ type SourceCodePluginOptions struct {
 	// Mode is the option's mode from EnhancementOptions; "static" makes a
 	// static plug-in, anything else a dynamic one, as the editor does.
 	Mode string
+	// Source, when given, is written into the new plug-in: syntax-checked
+	// first, then under a lock, with the creation's transport.
+	Source string
 }
 
 // enhancedObject is what an ENHO records about the object it enhances.
@@ -103,22 +106,26 @@ type enhancedObject struct {
 // the name and the main program the option lives in.
 func enhancedObjectFor(objectURL string) (enhancedObject, error) {
 	u := strings.TrimRight(strings.TrimSpace(objectURL), "/")
-	name := func(prefix string) string {
-		n, err := url.PathUnescape(strings.TrimPrefix(u, prefix))
-		if err != nil {
-			n = strings.TrimPrefix(u, prefix)
+	// leaf is the object name right after prefix: there must be one, and
+	// nothing after it -- a collection URL or a subresource such as
+	// .../source/main is not the object.
+	leaf := func(prefix string) (string, bool) {
+		rest, ok := strings.CutPrefix(u, prefix)
+		if !ok || rest == "" || strings.Contains(rest, "/") {
+			return "", false
 		}
-		return strings.ToUpper(n)
+		if n, err := url.PathUnescape(rest); err == nil {
+			rest = n
+		}
+		return strings.ToUpper(rest), true
 	}
-	switch {
-	case strings.HasPrefix(u, "/sap/bc/adt/functions/groups/") && !strings.Contains(strings.TrimPrefix(u, "/sap/bc/adt/functions/groups/"), "/"):
-		g := name("/sap/bc/adt/functions/groups/")
+	if g, ok := leaf("/sap/bc/adt/functions/groups/"); ok {
 		return enhancedObject{URI: u, Type: "FUGR/F", Name: g, Program: functionPool(g)}, nil
-	case strings.HasPrefix(u, "/sap/bc/adt/programs/programs/"):
-		p := name("/sap/bc/adt/programs/programs/")
+	}
+	if p, ok := leaf("/sap/bc/adt/programs/programs/"); ok {
 		return enhancedObject{URI: u, Type: "PROG/P", Name: p, Program: p}, nil
-	case strings.HasPrefix(u, "/sap/bc/adt/oo/classes/"):
-		cl := name("/sap/bc/adt/oo/classes/")
+	}
+	if cl, ok := leaf("/sap/bc/adt/oo/classes/"); ok {
 		return enhancedObject{URI: u, Type: "CLAS/OC", Name: cl, Program: classPool(cl)}, nil
 	}
 	return enhancedObject{}, fmt.Errorf("%s: the enhanced object must be a function group, a program or a class (its ADT URL)", objectURL)
@@ -168,6 +175,11 @@ func (c *Client) CreateSourceCodePlugin(ctx context.Context, opts SourceCodePlug
 		return "", err
 	}
 	opts.Transport = transport
+	if opts.Source != "" {
+		if err = c.checkSafety(OpUpdate, "CreateSourceCodePlugin"); err != nil {
+			return "", err
+		}
+	}
 
 	params := url.Values{}
 	if opts.Transport != "" {
@@ -183,7 +195,47 @@ func (c *Client) CreateSourceCodePlugin(ctx context.Context, opts SourceCodePlug
 	if err != nil {
 		return "", fmt.Errorf("creating %s: %w", opts.Name, err)
 	}
+	if opts.Source != "" {
+		if err = c.writeEnhancementSource(ctx, objectURL, opts.Source, opts.Transport); err != nil {
+			return objectURL, fmt.Errorf("created %s with an empty ENHANCEMENT block, but %w", opts.Name, err)
+		}
+	}
 	return objectURL, nil
+}
+
+// writeEnhancementSource writes the code of an ENHO this client just created.
+// It is syntax-checked before the lock is taken, so broken code is refused
+// rather than saved. The package was checked by the creation and the
+// transport chosen there, so the write neither resolves the package again
+// inside the lock window -- which would retire the session the lock belongs
+// to (#91) -- nor goes without the request.
+func (c *Client) writeEnhancementSource(ctx context.Context, enhoURL, source, transport string) error {
+	if checks, err := c.SyntaxCheck(ctx, enhoURL, source); err == nil {
+		var problems []string
+		for _, r := range checks {
+			if r.Severity == "E" || r.Severity == "A" {
+				problems = append(problems, fmt.Sprintf("line %d: %s", r.Line, r.Text))
+			}
+		}
+		if len(problems) > 0 {
+			return fmt.Errorf("the code has syntax errors and was not written: %s", strings.Join(problems, "; "))
+		}
+	}
+	ctx = withMutationPackageChecked(ctx, enhoURL)
+	lock, err := c.LockObject(ctx, enhoURL, "MODIFY")
+	if err != nil {
+		return fmt.Errorf("locking it to write the code failed: %w", err)
+	}
+	if err = c.UpdateSource(ctx, enhoURL+"/source/main", source, lock.LockHandle, transport); err != nil {
+		if uerr := c.releaseLockAfterFailure(ctx, enhoURL, lock.LockHandle); uerr != nil {
+			return fmt.Errorf("writing the code failed: %w; %s", err, strandedLockAdvice(enhoURL, uerr))
+		}
+		return fmt.Errorf("writing the code failed: %w", err)
+	}
+	if err = c.UnlockObject(ctx, enhoURL, lock.LockHandle); err != nil {
+		return fmt.Errorf("the code is written, but %s", strandedLockAdvice(enhoURL, err))
+	}
+	return nil
 }
 
 // enhancementCreateGates runs the checks every ENHO creation shares with

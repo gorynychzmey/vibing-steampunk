@@ -131,3 +131,30 @@ func TestCreateBadiImplementation_RefusesIncompleteInput(t *testing.T) {
 		}
 	}
 }
+
+// Writing the implementation is an update: a configuration that allows
+// creating but not updating refuses before the POST, leaving no empty ENHO.
+func TestCreateBadiImplementation_UpdateRefusedBeforeThePOST(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-csrf-token", "TOKEN")
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/enhoxhb") {
+			posts++
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := NewConfig(srv.URL, "TESTUSER", "pw")
+	cfg.Safety.DisallowedOps = "U"
+	c := NewClientWithTransport(cfg, NewTransport(cfg))
+
+	_, err := c.CreateBadiImplementation(context.Background(), BadiImplementationOptions{
+		Name: "zenh_demo", Description: "Demo", Package: "$TMP", Spot: "badi_x", ImplementingClass: "zcl_x",
+	})
+	if err == nil {
+		t.Fatal("an update-refusing configuration created the implementation")
+	}
+	if posts != 0 {
+		t.Errorf("the container was POSTed %d times before the refusal", posts)
+	}
+}

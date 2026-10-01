@@ -49,7 +49,10 @@ func TestEnhancedObjectFor(t *testing.T) {
 			t.Errorf("%s: %+v %v, want %+v", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", "/sap/bc/adt/programs/includes/lzdemotop", "/sap/bc/adt/functions/groups/zdemo/fmodules/z_demo"} {
+	for _, bad := range []string{"", "/sap/bc/adt/programs/includes/lzdemotop", "/sap/bc/adt/functions/groups/zdemo/fmodules/z_demo",
+		// a collection, and subresources of an object, are not the object
+		"/sap/bc/adt/programs/programs/", "/sap/bc/adt/functions/groups/",
+		"/sap/bc/adt/programs/programs/zreport/source/main", "/sap/bc/adt/oo/classes/zcl_demo/includes/testclasses"} {
 		if _, err := enhancedObjectFor(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

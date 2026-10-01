@@ -70,12 +70,17 @@ func (c *Client) CreateBadiImplementation(ctx context.Context, opts BadiImplemen
 		return "", err
 	}
 	opts.Transport = transport
+	// The implementation is written by a PUT into the container: an update.
+	// Refused here, before the POST, so a refusal leaves no empty ENHO.
+	if err = c.checkSafety(OpUpdate, "CreateBadiImplementation"); err != nil {
+		return "", err
+	}
 
 	params := url.Values{}
 	if opts.Transport != "" {
 		params.Set("corrNr", opts.Transport)
 	}
-	if _, err := c.transport.Request(ctx, enhoxhbCollection, &RequestOptions{
+	if _, err = c.transport.Request(ctx, enhoxhbCollection, &RequestOptions{
 		Method:      http.MethodPost,
 		Query:       params,
 		Body:        []byte(badiImplementationBody(opts, c.config.Language, false)),
@@ -102,11 +107,16 @@ func (c *Client) CreateBadiImplementation(ctx context.Context, opts BadiImplemen
 		Accept:      enhoxhbContentType,
 		Stateful:    true,
 	})
-	if uerr := c.UnlockObject(ctx, objectURL, lock.LockHandle); uerr != nil && err == nil {
-		err = uerr
-	}
 	if err != nil {
+		// Released on a context of its own: the PUT may have failed because
+		// ctx was cancelled, and the lock must not stay behind.
+		if uerr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); uerr != nil {
+			return objectURL, fmt.Errorf("created %s, but adding the implementation failed: %w; %s", opts.Name, err, strandedLockAdvice(objectURL, uerr))
+		}
 		return objectURL, fmt.Errorf("created %s, but adding the implementation failed: %w", opts.Name, err)
+	}
+	if uerr := c.UnlockObject(ctx, objectURL, lock.LockHandle); uerr != nil {
+		return objectURL, fmt.Errorf("created %s with its implementation, but %s", opts.Name, strandedLockAdvice(objectURL, uerr))
 	}
 	return objectURL, nil
 }

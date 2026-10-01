@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
 
@@ -101,49 +102,63 @@ func (s *Server) handleCreateSourceCodePlugin(ctx context.Context, request mcp.C
 		Transport:   getStringParam(args, "transport"),
 		ObjectURL:   objectURL,
 		Option:      getStringParam(args, "option"),
+		Source:      getStringParam(args, "source"),
 	}
 	// The mode decides a static or dynamic plug-in; take it from the option
 	// itself rather than make the caller repeat it.
-	if options, oerr := s.adtClient.EnhancementOptions(ctx, objectURL); oerr == nil {
-		found := false
-		for _, o := range options {
-			if o.FullName == opts.Option {
-				opts.Mode, found = o.Mode, true
-				break
-			}
+	// Without the list neither the option's existence nor its mode is known,
+	// and a wrong mode makes a plug-in of the wrong kind: stop there.
+	options, oerr := s.adtClient.EnhancementOptions(ctx, objectURL)
+	if oerr != nil {
+		return newToolResultError(fmt.Sprintf("cannot check the enhancement option: %v", oerr)), nil
+	}
+	found := false
+	for _, o := range options {
+		if o.FullName == opts.Option {
+			opts.Mode, found = o.Mode, true
+			break
 		}
-		if !found {
-			return newToolResultError(fmt.Sprintf("%s has no enhancement option %s; list them with SAP(action=\"read\", target=\"ENHANCEMENT_OPTIONS\")", objectURL, opts.Option)), nil
-		}
+	}
+	if !found {
+		return newToolResultError(fmt.Sprintf("%s has no enhancement option %s; list them with SAP(action=\"read\", target=\"ENHANCEMENT_OPTIONS\")", objectURL, opts.Option)), nil
 	}
 	enhoURL, err := s.adtClient.CreateSourceCodePlugin(ctx, opts)
 	if err != nil {
+		if enhoURL != "" {
+			return enhancementPartial(map[string]any{"object_url": enhoURL, "enhanced_object": objectURL, "option": opts.Option}, err.Error()), nil
+		}
 		return newToolResultError(err.Error()), nil
 	}
 	out := map[string]any{"object_url": enhoURL, "enhanced_object": objectURL, "option": opts.Option}
-
-	source := getStringParam(args, "source")
-	if source == "" {
+	if opts.Source == "" {
 		out["message"] = "created inactive with an empty ENHANCEMENT block; write the code to " + enhoURL + "/source/main"
 		return newToolResultJSON(out), nil
 	}
-	lock, err := s.adtClient.LockObject(ctx, enhoURL, "MODIFY")
-	if err != nil {
-		out["error"] = fmt.Sprintf("created, but locking it to write the code failed: %v", err)
-		return newToolResultJSON(out), nil
-	}
-	err = s.adtClient.UpdateSource(ctx, enhoURL+"/source/main", source, lock.LockHandle, opts.Transport)
-	_ = s.adtClient.UnlockObject(ctx, enhoURL, lock.LockHandle)
-	if err != nil {
-		out["error"] = fmt.Sprintf("created, but writing the code failed: %v", err)
-		return newToolResultJSON(out), nil
-	}
-	activation, err := s.adtClient.Activate(ctx, enhoURL, strings.ToUpper(opts.Name))
+	return s.activateEnhancement(ctx, out, enhoURL, opts.Name, "created and written"), nil
+}
+
+// activateEnhancement activates a new ENHO and reports it. SAP refuses an
+// activation in the answer, not with an HTTP error, so Success is checked
+// too: an inactive ENHO is not a completed create.
+func (s *Server) activateEnhancement(ctx context.Context, out map[string]any, enhoURL, name, done string) *mcp.CallToolResult {
+	activation, err := s.adtClient.Activate(ctx, enhoURL, strings.ToUpper(name))
 	out["activation"] = activation
-	if err != nil {
-		out["error"] = fmt.Sprintf("created and written, but activation failed: %v", err)
+	switch {
+	case err != nil:
+		return enhancementPartial(out, fmt.Sprintf("%s, but activation failed: %v", done, err))
+	case activation != nil && !activation.Success:
+		return enhancementPartial(out, fmt.Sprintf("%s, but SAP did not activate it: %s", done, strings.Join(activation.ProblemLines(), "; ")))
 	}
-	return newToolResultJSON(out), nil
+	return newToolResultJSON(out)
+}
+
+// enhancementPartial is a result for an ENHO that exists but is not complete:
+// what was done, and the error, marked as one.
+func enhancementPartial(out map[string]any, msg string) *mcp.CallToolResult {
+	out["error"] = msg
+	res := newToolResultJSON(out)
+	res.IsError = true
+	return res
 }
 
 // handleCreateBadiImplementation creates an ENHO with one BAdI implementation
@@ -174,7 +189,7 @@ func (s *Server) handleCreateBadiImplementation(ctx context.Context, request mcp
 	enhoURL, err := s.adtClient.CreateBadiImplementation(ctx, opts)
 	if err != nil {
 		if enhoURL != "" {
-			return newToolResultJSON(map[string]any{"object_url": enhoURL, "error": err.Error()}), nil
+			return enhancementPartial(map[string]any{"object_url": enhoURL}, err.Error()), nil
 		}
 		return newToolResultError(err.Error()), nil
 	}
@@ -183,12 +198,7 @@ func (s *Server) handleCreateBadiImplementation(ctx context.Context, request mcp
 		out["message"] = "created inactive; activate " + enhoURL + " to put the implementation in force"
 		return newToolResultJSON(out), nil
 	}
-	activation, err := s.adtClient.Activate(ctx, enhoURL, strings.ToUpper(opts.Name))
-	out["activation"] = activation
-	if err != nil {
-		out["error"] = fmt.Sprintf("created, but activation failed: %v", err)
-	}
-	return newToolResultJSON(out), nil
+	return s.activateEnhancement(ctx, out, enhoURL, opts.Name, "created"), nil
 }
 
 func firstNonEmptyParam(args map[string]any, keys ...string) string {
