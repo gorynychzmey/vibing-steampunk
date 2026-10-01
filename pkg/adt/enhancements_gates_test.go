@@ -1,0 +1,92 @@
+package adt
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+)
+
+const testEnhoxhhURL = "/sap/bc/adt/enhancements/enhoxhh/zenh_demo"
+
+func testPluginOptions(pkg, transport, source string) SourceCodePluginOptions {
+	return SourceCodePluginOptions{
+		Name: "zenh_demo", Description: "Demo", Package: pkg, Transport: transport,
+		ObjectURL: "/sap/bc/adt/functions/groups/zdemo", Option: `\FU:Z_DEMO\SE:BEGIN\EI`,
+		Source: source,
+	}
+}
+
+func testBadiOptions(pkg, transport string) BadiImplementationOptions {
+	return BadiImplementationOptions{
+		Name: "zenh_demo", Description: "Demo", Package: pkg, Transport: transport,
+		Spot: "badi_x", ImplementingClass: "zcl_x",
+	}
+}
+
+// --read-only refuses both creates before a single request leaves.
+func TestEnhancementCreates_ReadOnlyRefusedBeforeAnyRequest(t *testing.T) {
+	for name, create := range map[string]func(*Client) error{
+		"source code plug-in": func(c *Client) error {
+			_, err := c.CreateSourceCodePlugin(context.Background(), testPluginOptions("$TMP", "", ""))
+			return err
+		},
+		"source code plug-in with code": func(c *Client) error {
+			_, err := c.CreateSourceCodePlugin(context.Background(), testPluginOptions("$TMP", "", "WRITE 'x'."))
+			return err
+		},
+		"BAdI implementation": func(c *Client) error {
+			_, err := c.CreateBadiImplementation(context.Background(), testBadiOptions("$TMP", ""))
+			return err
+		},
+	} {
+		rec := &adtRecorder{}
+		c := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}, WithReadOnly())
+		if err := create(c); err == nil {
+			t.Errorf("%s: created under --read-only", name)
+		}
+		if calls := rec.snapshot(); len(calls) > 0 {
+			t.Errorf("%s: %d request(s) reached SAP before the refusal", name, len(calls))
+			dumpCalls(t, calls)
+		}
+	}
+}
+
+// With --allowed-packages the code goes in without a package lookup between
+// the LOCK and the PUT: the creation checked the package, and a stateless
+// search inside the window retires the session the lock lives in (#91).
+func TestCreateSourceCodePlugin_NoStatelessRequestBetweenLockAndPut(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "informationsystem/search"):
+			_, _ = io.WriteString(w, searchXMLFor(testEnhoxhhURL, "ZENH_DEMO", "ZPKG"))
+		case strings.Contains(r.URL.Path, "/checkruns"):
+			w.Header().Set("Content-Type", "application/vnd.sap.adt.checkmessages+xml")
+			_, _ = io.WriteString(w, testEmptyCheckXML)
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		case r.Method == http.MethodPost && r.URL.Path == enhoxhhCollection:
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithAllowedPackages("Z*"), WithAllowTransportableEdits())
+
+	if _, err := client.CreateSourceCodePlugin(context.Background(),
+		testPluginOptions("ZPKG", "TR-EXAMPLE-1", "WRITE 'x'.")); err != nil {
+		t.Fatalf("CreateSourceCodePlugin: %v", err)
+	}
+
+	calls := rec.snapshot()
+	lockAt := indexOfCall(calls, isLock)
+	putAt := indexOfCall(calls, isSourcePut)
+	if lockAt < 0 || putAt < 0 || putAt < lockAt {
+		t.Fatalf("expected a LOCK followed by a source PUT; trace:\n%v", calls)
+	}
+	assertWindowStateful(t, calls, lockAt, putAt)
+}
