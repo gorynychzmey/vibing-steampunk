@@ -106,7 +106,7 @@ func (c *Client) DeleteClassicBadiImplementation(ctx context.Context, name, tran
 	if !strings.HasPrefix(pkg, "$") && transport == "" {
 		return nil, fmt.Errorf("%s is in the transportable package %s: a transport request is required", name, pkg)
 	}
-	if err := c.checkMutation(ctx, MutationContext{
+	if err = c.checkMutation(ctx, MutationContext{
 		Op: OpDelete, OpName: "DeleteClassicBadiImplementation",
 		Package: pkg, Transport: transport,
 	}); err != nil {
@@ -223,7 +223,7 @@ func validateABAPName(what, name string, max int) error {
 		return fmt.Errorf("%s %s is longer than %d characters", what, name, max)
 	}
 	for _, r := range name {
-		if !(r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '/' || r == '$') {
+		if (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '/' && r != '$' {
 			return fmt.Errorf("%s %q contains %q", what, name, r)
 		}
 	}
