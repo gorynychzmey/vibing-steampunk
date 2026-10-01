@@ -93,6 +93,16 @@ Create object:
   SAP(action="create", target="OBJECT", params={"object_type": "MSAG/N", "name": "ZDEMO", "description": "Demo messages", "package_name": "$TMP", "language": "DE", "messages": {"001": "Auftrag & nicht gefunden"}})
   SAP(action="create", target="TABL", params={"name": "ZTABLE", "description": "New table", "fields": "[...]", "package": "$TMP"})
   SAP(action="create", target="CLONE", params={"object_type": "CLAS", "source_name": "ZCL_OLD", "target_name": "ZCL_NEW", "package": "$TMP"})
+  SAP(action="create", target="STRUCT", params={"description": "Demo", "package": "$TMP",
+      "source": "@AbapCatalog.enhancement.category : #EXTENSIBLE_ANY
+define structure zdemo {
+  matnr : matnr;
+}"})
+  SAP(action="create", target="APPEND", params={"description": "Demo append", "package": "ZPKG", "transport": "A4HK900001",
+      "source": "extend type shp_vl10_item with zappend_demo {
+  zzflag : abap_boolean;
+}"})
+      (name and base come from the DDL; activation is checked against the inactive list)
 
 Enhancement implementation (source code plug-in, ENHO): list the options, then create one --
   SAP(action="read", target="ENHANCEMENT_OPTIONS", params={"function_module": "BAPI_X"})   (or object_url, function_group, program, class; "filter")
@@ -491,6 +501,7 @@ Transports:
   SAP(action="system", params={"type": "list_transports", "request_status": "R", "released_from": "20260101", "released_to": "20261231"})
   SAP(action="system", params={"type": "get_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "create_transport", "description": "...", "package": "$TMP"})
+  SAP(action="system", params={"type": "create_transport", "description": "...", "package": "ZDEMO", "cts_project": "PRJ_DEMO", "target": "/GROUP/"})  - filed under a CTS project (default: --cts-project)
   SAP(action="system", params={"type": "release_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "delete_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "merge_transports", "source": ["A4HK900001", "A4HK900003"], "target": "A4HK900005"})
