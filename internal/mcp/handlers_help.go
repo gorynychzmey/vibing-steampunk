@@ -103,6 +103,10 @@ define structure zdemo {
   zzflag : abap_boolean;
 }"})
       (name and base come from the DDL; activation is checked against the inactive list)
+  SAP(action="create", target="DOMA ZDEMO", params={"description": "Demo", "package": "$TMP", "data_type": "CHAR", "length": 2,
+      "fixed_values": [{"low": "A", "text": "Alpha"}]})   ("decimals", "output_length", "lowercase", "signed", "conversion_exit", "value_table")
+  SAP(action="create", target="DTEL ZDEMO", params={"description": "Demo", "package": "$TMP", "domain": "ZDEMO",
+      "short_label": "Demo", "medium_label": "Demo field", "long_label": "Demo field", "heading": "Demo"})   (or "data_type" + "length"; "search_help", "parameter_id")
 
 Enhancement implementation (source code plug-in, ENHO): list the options, then create one --
   SAP(action="read", target="ENHANCEMENT_OPTIONS", params={"function_module": "BAPI_X"})   (or object_url, function_group, program, class; "filter")
