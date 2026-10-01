@@ -17,6 +17,11 @@ func handleHelp(topic string) *mcp.CallToolResult {
 	case "read":
 		return mcp.NewToolResultText(`SAP(action="read") - Read source code and metadata
 
+IDoc, as WE02 shows it (classic RFC; segment data EDID4-SDATA cannot be queried):
+  SAP(action="read", target="IDOC 28757955")
+  SAP(action="read", target="IDOC 28757955", params={"segment": "E1EDKA1"})   (prefix; "all_fields": true, "raw": true, "max_segments": 500)
+  Control record, status records newest first with their texts, segments cut into fields by the segment definition.
+
 Read source with context (recommended):
   SAP(action="read", target="CLAS ZCL_TEST")
   SAP(action="read", target="PROG ZREPORT")
@@ -505,6 +510,10 @@ Transports:
   SAP(action="system", params={"type": "delete_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "merge_transports", "source": ["A4HK900001", "A4HK900003"], "target": "A4HK900005"})
   SAP(action="system", params={"type": "move_transport_object", "object": "PROG ZDEMO", "from": "A4HK900001", "to": "A4HK900005"})
+  SAP(action="system", params={"type": "add_transport_object", "transport": "A4HK900001", "objects": ["LIMU REPT ZDEMO", "R3TR PROG ZDEMO2"]})
+  SAP(action="system", params={"type": "add_transport_object", "transport": "A4HK900001", "object": "R3TR TABU ZDEMO_CONF", "keys": ["100KEY1", "100KEY2*"]})
+  SAP(action="system", params={"type": "remove_transport_object", "transport": "A4HK900001", "object": "PROG ZDEMO"})
+    (add goes to your task in the request; table keys are TABKEY: key fields end to end at full length, '*' generic)
       SE09's Merge Requests and a single entry's move, through ZADT_VSP's function bridge (needs ZADT_VSP)
   SAP(action="system", params={"type": "get_user_transports", "user_name": "DEVELOPER"})
       same parameters as list_transports (request_type, request_status, released_from/to, targets, source, config_uri)
@@ -656,7 +665,7 @@ func getUnhandledErrorMessage(action, objectType, objectName string) string {
 
 	switch action {
 	case "read":
-		sb.WriteString("Supported read targets: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, TABL, TABL_CONTENTS, DEVC, MSAG, TRAN, TYPE_INFO, STRUCT, CDS_DEPS\n")
+		sb.WriteString("Supported read targets: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, TABL, TABL_CONTENTS, DEVC, MSAG, TRAN, TYPE_INFO, STRUCT, CDS_DEPS, IDOC\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"read\") for examples.")
 	case "edit":
 		sb.WriteString("Supported edit targets: CLAS, PROG, INTF, FUNC, DDLS, BDEF, SRVD, TABL, SEGM, LOCK, UNLOCK, UPDATE_SOURCE, ACTIVATE, ACTIVATE_PACKAGE, EDITSOURCE, PUBLISH_SERVICE, UNPUBLISH_SERVICE\n")

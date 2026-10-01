@@ -571,3 +571,35 @@ screen enhancements of a BAdI are not implemented; the result warns when the BAd
 has them. `delete` also deletes the implementing class unless another
 implementation uses it or `keep_class` is true. For a classic BAdI that SAP
 migrated to an enhancement spot, an ENHO BAdI implementation is the better choice.
+
+### IDocs (`read IDOC`)
+
+An IDoc's segment data sits in `EDID4-SDATA`, an LRAW field that neither the data
+preview nor `RFC_READ_TABLE` can select, and `IDOC_READ_COMPLETELY` is not
+remote-enabled. `read IDOC` goes through the EDI document API over RFC instead:
+`EDI_DOCUMENT_OPEN_FOR_READ`, `EDI_SEGMENTS_GET_ALL` and
+`EDI_DOCUMENT_READ_ALL_STATUS`, on one connection.
+
+```
+SAP(action="read", target="IDOC 28757955")
+SAP(action="read", target="IDOC 28757955", params={"segment":"E1EDKA1"})
+```
+
+The result carries three parts:
+
+- the control record;
+- the status records, newest first, each with the meaning of its code (TEDS2) and
+  its message text with the parameters filled in (T100 where EDIDS keeps only the
+  message);
+- the segments with their fields.
+
+Segments are cut into fields by the layout of the basic type and its extension
+(`IDOCTYPE_READ_COMPLETE`). A segment the type does not list gets its layout from
+`SEGMENT_READ_COMPLETE`; if that fails too, its raw `data` is returned.
+
+Parameters:
+
+- `segment` keeps only segment types starting with that prefix;
+- `all_fields` also returns fields that are empty;
+- `raw` returns SDATA without cutting it into fields;
+- `max_segments` limits the number of segments (default 500).
