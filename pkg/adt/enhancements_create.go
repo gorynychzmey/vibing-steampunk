@@ -226,6 +226,14 @@ func (c *Client) writeEnhancementSource(ctx context.Context, enhoURL, source, tr
 	if err != nil {
 		return fmt.Errorf("locking it to write the code failed: %w", err)
 	}
+	// With no request chosen at creation, the write goes with the one the
+	// lock names, as every other source write does.
+	if transport, err = c.resolveWriteTransport(transport, lock.CorrNr, "CreateSourceCodePlugin"); err != nil {
+		if uerr := c.releaseLockAfterFailure(ctx, enhoURL, lock.LockHandle); uerr != nil {
+			return fmt.Errorf("%w; %s", err, strandedLockAdvice(enhoURL, uerr))
+		}
+		return err
+	}
 	if err = c.UpdateSource(ctx, enhoURL+"/source/main", source, lock.LockHandle, transport); err != nil {
 		if uerr := c.releaseLockAfterFailure(ctx, enhoURL, lock.LockHandle); uerr != nil {
 			return fmt.Errorf("writing the code failed: %w; %s", err, strandedLockAdvice(enhoURL, uerr))

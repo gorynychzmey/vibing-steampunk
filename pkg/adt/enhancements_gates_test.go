@@ -8,7 +8,17 @@ import (
 	"testing"
 )
 
-const testEnhoxhhURL = "/sap/bc/adt/enhancements/enhoxhh/zenh_demo"
+const (
+	testEnhoxhhURL = "/sap/bc/adt/enhancements/enhoxhh/zenh_demo"
+	testEnhoxhbURL = "/sap/bc/adt/enhancements/enhoxhb/zenh_demo"
+)
+
+// testLockWithCorrNrXML is a LOCK answer for an object in a transportable
+// package: the lock names the request the object is recorded in.
+const testLockWithCorrNrXML = `<?xml version="1.0" encoding="UTF-8"?>
+<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0"><asx:values><DATA>
+<LOCK_HANDLE>HANDLE-1</LOCK_HANDLE><CORRNR>TR-EXAMPLE-2</CORRNR>
+</DATA></asx:values></asx:abap>`
 
 func testPluginOptions(pkg, transport, source string) SourceCodePluginOptions {
 	return SourceCodePluginOptions{
@@ -89,4 +99,104 @@ func TestCreateSourceCodePlugin_NoStatelessRequestBetweenLockAndPut(t *testing.T
 		t.Fatalf("expected a LOCK followed by a source PUT; trace:\n%v", calls)
 	}
 	assertWindowStateful(t, calls, lockAt, putAt)
+}
+
+// With no request named or chosen, the code goes with the request the lock
+// names, as every other write under a lock does.
+func TestCreateSourceCodePlugin_WriteCarriesTheLockTransport(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/checkruns"):
+			w.Header().Set("Content-Type", "application/vnd.sap.adt.checkmessages+xml")
+			_, _ = io.WriteString(w, testEmptyCheckXML)
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockWithCorrNrXML)
+		case r.Method == http.MethodPost && r.URL.Path == enhoxhhCollection:
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithTransportChoice("off"), WithAllowTransportableEdits())
+
+	if _, err := client.CreateSourceCodePlugin(context.Background(),
+		testPluginOptions("ZPKG", "", "WRITE 'x'.")); err != nil {
+		t.Fatalf("CreateSourceCodePlugin: %v", err)
+	}
+	calls := rec.snapshot()
+	putAt := indexOfCall(calls, isSourcePut)
+	if putAt < 0 {
+		t.Fatalf("no source PUT; trace:\n%v", calls)
+	}
+	if got := calls[putAt].query.Get("corrNr"); got != "TR-EXAMPLE-2" {
+		t.Errorf("source PUT corrNr = %q, want the lock's TR-EXAMPLE-2", got)
+		dumpCalls(t, calls)
+	}
+}
+
+func TestCreateBadiImplementation_WriteCarriesTheLockTransport(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockWithCorrNrXML)
+		case r.Method == http.MethodPost && r.URL.Path == enhoxhbCollection:
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithTransportChoice("off"), WithAllowTransportableEdits())
+
+	if _, err := client.CreateBadiImplementation(context.Background(), testBadiOptions("ZPKG", "")); err != nil {
+		t.Fatalf("CreateBadiImplementation: %v", err)
+	}
+	calls := rec.snapshot()
+	putAt := indexOfCall(calls, func(c wireCall) bool {
+		return c.method == http.MethodPut && c.path == testEnhoxhbURL
+	})
+	if putAt < 0 {
+		t.Fatalf("no PUT of the implementation; trace:\n%v", calls)
+	}
+	if got := calls[putAt].query.Get("corrNr"); got != "TR-EXAMPLE-2" {
+		t.Errorf("implementation PUT corrNr = %q, want the lock's TR-EXAMPLE-2", got)
+		dumpCalls(t, calls)
+	}
+}
+
+// The lock's request is still subject to the transportable-edit policy: when
+// it is refused, nothing is written and the lock is released.
+func TestCreateSourceCodePlugin_LockTransportRefusedReleasesTheLock(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/checkruns"):
+			w.Header().Set("Content-Type", "application/vnd.sap.adt.checkmessages+xml")
+			_, _ = io.WriteString(w, testEmptyCheckXML)
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockWithCorrNrXML)
+		case r.Method == http.MethodPost && r.URL.Path == enhoxhhCollection:
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithTransportChoice("off"))
+
+	u, err := client.CreateSourceCodePlugin(context.Background(), testPluginOptions("ZPKG", "", "WRITE 'x'."))
+	if err == nil || !strings.Contains(err.Error(), "TR-EXAMPLE-2") {
+		t.Fatalf("expected the lock's request to be refused, got %v", err)
+	}
+	if u != testEnhoxhhURL {
+		t.Errorf("the created ENHO is not reported: %q", u)
+	}
+	calls := rec.snapshot()
+	if indexOfCall(calls, isSourcePut) >= 0 {
+		t.Error("the code was written with a refused request")
+	}
+	if indexOfCall(calls, func(c wireCall) bool { return c.query.Get("_action") == "UNLOCK" }) < 0 {
+		t.Error("the lock was not released")
+		dumpCalls(t, calls)
+	}
 }

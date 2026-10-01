@@ -94,6 +94,14 @@ func (c *Client) CreateBadiImplementation(ctx context.Context, opts BadiImplemen
 	if err != nil {
 		return objectURL, fmt.Errorf("created %s, but locking it to add the implementation failed: %w", opts.Name, err)
 	}
+	// With no request chosen at creation, the PUT goes with the one the lock
+	// names, as every other write under a lock does.
+	if opts.Transport, err = c.resolveWriteTransport(opts.Transport, lock.CorrNr, "CreateBadiImplementation"); err != nil {
+		if uerr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); uerr != nil {
+			return objectURL, fmt.Errorf("created %s, but %w; %s", opts.Name, err, strandedLockAdvice(objectURL, uerr))
+		}
+		return objectURL, fmt.Errorf("created %s, but %w", opts.Name, err)
+	}
 	put := url.Values{}
 	put.Set("lockHandle", lock.LockHandle)
 	if opts.Transport != "" {
