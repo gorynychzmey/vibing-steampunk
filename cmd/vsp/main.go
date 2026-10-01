@@ -4,7 +4,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,6 +23,10 @@ var (
 	Version   = "dev"
 	Commit    = "unknown"
 	BuildDate = "unknown"
+	// ReleaseRepo is the owner/name of the GitHub repository this binary is
+	// released from, set by build flags; empty means the default
+	// (oisee/vibing-steampunk).
+	ReleaseRepo = ""
 )
 
 var cfg = &mcp.Config{}
@@ -143,7 +149,13 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.EnableTransports, "enable-transports", false, "Enable transport management operations (disabled by default for safety)")
 	rootCmd.Flags().BoolVar(&cfg.TransportReadOnly, "transport-read-only", false, "Only allow read operations on transports (list, get)")
 	rootCmd.Flags().StringSliceVar(&cfg.AllowedTransports, "allowed-transports", nil, "Restrict transport operations to specific transports (comma-separated, supports wildcards like A4HK*)")
-	rootCmd.Flags().BoolVar(&cfg.AllowTransportableEdits, "allow-transportable-edits", false, "Allow editing objects in transportable packages (requires transport parameter)")
+	// This is persistent because CLI subcommands such as `source write` must
+	// receive the same explicit transportable-edit opt-in as the MCP server.
+	// Keep it separate from the other root-only safety flags: moving all of
+	// them would broaden this command-line surface without solving #117.
+	rootCmd.PersistentFlags().BoolVar(&cfg.AllowTransportableEdits, "allow-transportable-edits", false, "Allow editing objects in transportable packages (requires transport parameter)")
+	rootCmd.Flags().StringVar(&cfg.CTSProject, "cts-project", "", "CTS project every request vsp creates is filed under, unless the call names one (for systems that require a project)")
+	rootCmd.Flags().StringVar(&cfg.TransportTarget, "transport-target", "", "Transport target of every request vsp creates, unless the call names one")
 	rootCmd.Flags().StringVar(&cfg.TransportChoice, "transport-choice", "auto", "A write with no transport named: auto picks the object's own or an open request of yours that fits (and creates one with --enable-transports); off leaves it to SAP, which generates a request per write")
 
 	// Mode options
@@ -201,7 +213,7 @@ func init() {
 	viper.BindPFlag("enable-transports", rootCmd.Flags().Lookup("enable-transports"))
 	viper.BindPFlag("transport-read-only", rootCmd.Flags().Lookup("transport-read-only"))
 	viper.BindPFlag("allowed-transports", rootCmd.Flags().Lookup("allowed-transports"))
-	viper.BindPFlag("allow-transportable-edits", rootCmd.Flags().Lookup("allow-transportable-edits"))
+	viper.BindPFlag("allow-transportable-edits", rootCmd.PersistentFlags().Lookup("allow-transportable-edits"))
 	viper.BindPFlag("mode", rootCmd.Flags().Lookup("mode"))
 	viper.BindPFlag("disabled-groups", rootCmd.Flags().Lookup("disabled-groups"))
 	viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
@@ -317,12 +329,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Load transport_attribute from default system if not already set via env
-		if cfg.TransportAttribute == "" && systemsCfg.Default != "" {
-			if sys, err := systemsCfg.GetSystem(systemsCfg.Default); err == nil && sys.TransportAttribute != "" {
-				cfg.TransportAttribute = sys.TransportAttribute
-			}
-		}
+		warnNamedSystemMismatch(os.Stderr, cfg, systemsCfg)
+
+		applyDefaultSystemSettings(cfg, systemsCfg)
 	}
 
 	// The binary's own identity, so SAP() can say which build answered. An
@@ -342,6 +351,45 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return srv.ServeHTTP(addr)
 	default:
 		return srv.ServeStdio()
+	}
+}
+
+// warnNamedSystemMismatch says at startup when the system named by -s /
+// SAP_SYSTEM is not the one SAP_URL and SAP_CLIENT connect to. RFC use
+// refuses it later; this only makes the reason visible before then.
+func warnNamedSystemMismatch(w io.Writer, c *mcp.Config, systemsCfg *config.SystemsConfig) {
+	if c.SystemName == "" || systemsCfg == nil {
+		return
+	}
+	sys, ok := systemsCfg.Systems[c.SystemName]
+	if !ok {
+		return
+	}
+	if err := mcp.NamedSystemMismatch(c.SystemName, sys, c.BaseURL, c.Client); err != nil {
+		fmt.Fprintf(w, "[WARNING] %v; RFC calls will be refused\n", err)
+	}
+}
+
+// applyDefaultSystemSettings fills what the flags and the environment left
+// empty from the default system in .vsp.json: transport_attribute, and where a
+// request vsp creates is filed, cts_project and transport_target. The CLI takes
+// the same keys from the system it runs against (resolveSystemParams).
+func applyDefaultSystemSettings(c *mcp.Config, systemsCfg *config.SystemsConfig) {
+	if systemsCfg == nil || systemsCfg.Default == "" {
+		return
+	}
+	sys, err := systemsCfg.GetSystem(systemsCfg.Default)
+	if err != nil {
+		return
+	}
+	if c.TransportAttribute == "" && sys.TransportAttribute != "" {
+		c.TransportAttribute = sys.TransportAttribute
+	}
+	if c.CTSProject == "" && sys.CTSProject != "" {
+		c.CTSProject = sys.CTSProject
+	}
+	if c.TransportTarget == "" && sys.TransportTarget != "" {
+		c.TransportTarget = sys.TransportTarget
 	}
 }
 
@@ -453,10 +501,21 @@ func resolveConfig(cmd *cobra.Command) {
 	if !cmd.Flags().Changed("allow-transportable-edits") {
 		cfg.AllowTransportableEdits = viper.GetBool("ALLOW_TRANSPORTABLE_EDITS")
 	}
+	// The server's own system in .vsp.json, for its per-system settings.
+	cfg.SystemName = systemName
+	if cfg.SystemName == "" {
+		cfg.SystemName = viper.GetString("SYSTEM")
+	}
 	if !cmd.Flags().Changed("transport-choice") {
 		if v := viper.GetString("TRANSPORT_CHOICE"); v != "" {
 			cfg.TransportChoice = v
 		}
+	}
+	if !cmd.Flags().Changed("cts-project") {
+		cfg.CTSProject = viper.GetString("CTS_PROJECT")
+	}
+	if !cmd.Flags().Changed("transport-target") {
+		cfg.TransportTarget = viper.GetString("TRANSPORT_TARGET")
 	}
 
 	// Feature configuration: flag > SAP_FEATURE_* env
@@ -794,8 +853,9 @@ func processCookieAuth(cmd *cobra.Command) error {
 
 	// Process cookie file
 	if cookieFile != "" {
-		if _, err := os.Stat(cookieFile); os.IsNotExist(err) {
-			return fmt.Errorf("cookie file not found: %s", cookieFile)
+		cookieFile, err := filepath.Abs(cookieFile)
+		if err != nil {
+			return fmt.Errorf("resolving cookie file path: %w", err)
 		}
 
 		cookies, err := adt.LoadCookiesFromFile(cookieFile)
@@ -808,6 +868,12 @@ func processCookieAuth(cmd *cobra.Command) error {
 		}
 
 		cfg.Cookies = cookies
+		reauth, err := adt.NewCookieFileReauthFunc(cookieFile)
+		if err != nil {
+			return err
+		}
+		cfg.ReauthFunc = reauth
+		cfg.ReauthReadOnly = true
 		if cfg.Verbose {
 			fmt.Fprintf(os.Stderr, "[VERBOSE] Loaded %d cookies from file: %s\n", len(cookies), cookieFile)
 		}

@@ -46,7 +46,7 @@ type DeployFromFileOptions struct {
 // Example:
 //
 //	result, err := client.CreateFromFile(ctx, "/path/to/zcl_test.clas.abap", "$TMP", "")
-func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, transport string) (*DeployResult, error) {
+func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, transport string) (result *DeployResult, err error) {
 	// Safety check
 	if err := c.checkSafety(OpCreate, "CreateFromFile"); err != nil {
 		return nil, err
@@ -122,7 +122,7 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 	}
 
 	// 6. Lock object
-	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY")
+	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
 		return &DeployResult{
 			FilePath:   filePath,
@@ -135,11 +135,13 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 		}, nil
 	}
 
-	// Ensure unlock on any error
+	// Ensure unlock on any error, detached from ctx's cancellation (issue #91/#166).
 	unlocked := false
 	defer func() {
 		if !unlocked {
-			_ = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lockResult.LockHandle); unlockErr != nil && result != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -248,7 +250,7 @@ func (c *Client) UpdateFromFile(ctx context.Context, filePath, transport string)
 
 // UpdateFromFileWithOptions is UpdateFromFile with an optional source version
 // precondition. Its check happens after the object lock is acquired.
-func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transport string, opts *DeployFromFileOptions) (*DeployResult, error) {
+func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transport string, opts *DeployFromFileOptions) (result *DeployResult, err error) {
 	if opts != nil {
 		ctx = withExpectedSourceHash(ctx, opts.ExpectedSourceHash)
 	}
@@ -334,7 +336,7 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 
 	// 5. Lock object
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
-	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY")
+	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
 	if err != nil {
 		return &DeployResult{
 			FilePath:   filePath,
@@ -347,11 +349,13 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 		}, nil
 	}
 
-	// Ensure unlock on any error
+	// Ensure unlock on any error, detached from ctx's cancellation (issue #91/#166).
 	unlocked := false
 	defer func() {
 		if !unlocked {
-			_ = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lockResult.LockHandle); unlockErr != nil && result != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -468,7 +472,7 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 		objTypeStr = fmt.Sprintf("%s.%s", info.ObjectType, info.ClassIncludeType)
 	}
 
-	result := &DeployResult{
+	result = &DeployResult{
 		FilePath:      filePath,
 		ObjectURL:     objectURL,
 		ObjectName:    info.ObjectName,
@@ -598,7 +602,15 @@ func (c *Client) buildObjectURL(objType CreatableObjectType, name string) (strin
 
 // buildObjectURLWithParent constructs the ADT URL for an object type with optional parent
 func (c *Client) buildObjectURLWithParent(objType CreatableObjectType, name, parentName string) (string, error) {
-	name = strings.ToLower(name)
+	// RAP sources keep the lowercase name GetObjectURL gives them, namespace
+	// or not; only the classic types are addressed in uppercase when the name
+	// carries a /NAMESPACE/.
+	rapName := url.PathEscape(strings.ToLower(name))
+	if strings.Contains(name, "/") {
+		name = strings.ToUpper(name)
+	} else {
+		name = strings.ToLower(name)
+	}
 	// URL encode to handle namespaced objects like /DMO/...
 	encodedName := url.PathEscape(name)
 	switch objType {
@@ -614,18 +626,22 @@ func (c *Client) buildObjectURLWithParent(objType CreatableObjectType, name, par
 		if parentName == "" {
 			return "", fmt.Errorf("function module requires parent function group name")
 		}
-		parentName = strings.ToLower(parentName)
+		if strings.Contains(parentName, "/") {
+			parentName = strings.ToUpper(parentName)
+		} else {
+			parentName = strings.ToLower(parentName)
+		}
 		encodedParent := url.PathEscape(parentName)
 		return fmt.Sprintf("/sap/bc/adt/functions/groups/%s/fmodules/%s", encodedParent, encodedName), nil
 	case ObjectTypeInclude:
 		return fmt.Sprintf("/sap/bc/adt/programs/includes/%s", encodedName), nil
 	// RAP object types
 	case ObjectTypeDDLS:
-		return fmt.Sprintf("/sap/bc/adt/ddic/ddl/sources/%s", encodedName), nil
+		return fmt.Sprintf("/sap/bc/adt/ddic/ddl/sources/%s", rapName), nil
 	case ObjectTypeBDEF:
-		return fmt.Sprintf("/sap/bc/adt/bo/behaviordefinitions/%s", encodedName), nil
+		return fmt.Sprintf("/sap/bc/adt/bo/behaviordefinitions/%s", rapName), nil
 	case ObjectTypeSRVD:
-		return fmt.Sprintf("/sap/bc/adt/ddic/srvd/sources/%s", encodedName), nil
+		return fmt.Sprintf("/sap/bc/adt/ddic/srvd/sources/%s", rapName), nil
 	default:
 		return "", fmt.Errorf("unsupported object type for URL building: %s", objType)
 	}

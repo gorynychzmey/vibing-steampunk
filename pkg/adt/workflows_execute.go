@@ -184,12 +184,31 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 	// Ensure cleanup on any error (unless KeepProgram is set)
 	defer func() {
 		if !opts.KeepProgram {
-			// Try to delete the program
-			lock, lockErr := c.LockObject(ctx, objectURL, "MODIFY")
-			if lockErr == nil {
-				_ = c.DeleteObject(ctx, objectURL, lock.LockHandle, "")
-				result.CleanedUp = true
+			// The workflow may have returned because ctx was cancelled. Cleanup has
+			// to keep the mutation-policy mark above, but cannot inherit that
+			// cancellation or it will never reach SAP to release the temp object.
+			cleanupCtx, cancel := failureCleanupContext(ctx)
+			defer cancel()
+
+			lock, lockErr := c.LockObject(cleanupCtx, objectURL, "MODIFY")
+			if lockErr != nil {
+				appendExecuteCleanupWarning(result, fmt.Sprintf("could not lock the temporary program for cleanup: %v", lockErr))
+				return
 			}
+
+			// DELETE is intentionally attempted once. A failed request is an
+			// unknown result, not permission to retry a potentially completed
+			// mutation. CleanedUp therefore means only that this DELETE succeeded;
+			// it does not claim a subsequent read verified the object is absent.
+			if deleteErr := c.DeleteObject(cleanupCtx, objectURL, lock.LockHandle, ""); deleteErr != nil {
+				appendExecuteCleanupWarning(result, fmt.Sprintf("temporary-program DELETE outcome is unknown and was not retried: %v", deleteErr))
+				if unlockErr := c.releaseLockAfterFailure(cleanupCtx, objectURL, lock.LockHandle); unlockErr != nil {
+					appendExecuteCleanupWarning(result, strandedLockAdvice(objectURL, unlockErr))
+				}
+				return
+			}
+
+			result.CleanedUp = true
 		}
 	}()
 
@@ -203,8 +222,10 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 	sourceURL := objectURL + "/source/main"
 	err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, "")
 	if err != nil {
-		_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
 		result.Message = fmt.Sprintf("Failed to update source: %v", err)
+		if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+			appendExecuteCleanupWarning(result, strandedLockAdvice(objectURL, unlockErr))
+		}
 		return result, nil
 	}
 
@@ -290,6 +311,31 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 		}
 	}
 
+	// A test class above the system's risk level is "not executed": ABAP Unit
+	// lists the class with no test method and says why only in a warning, with
+	// severity "tolerable". That warning was the only report of a run that
+	// never happened, and because only failures were checked, the run used to
+	// be reported as a success. A listed method did run, even when it left
+	// before the closing assertion (an early CHECK, RETURN or EXIT), so only a
+	// result with no test method at all is a run that did not happen.
+	if result.Failure == nil && len(testResult.Classes) > 0 && !anyTestMethod(testResult.Classes) && !anyExecResult(result.RawAlerts) && PayloadFailure(result.RawAlerts) == nil {
+		result.Failure = &ExecuteFailure{
+			Kind:  ExecuteFailureNotRun,
+			Title: "ABAP Unit did not run the code to its end",
+			Details: []string{
+				fmt.Sprintf("%s activated, but the closing assertion that every completed run ends in never came back.", programName),
+			},
+		}
+		for _, alert := range result.RawAlerts {
+			result.Failure.Details = append(result.Failure.Details, alert.Title)
+			result.Failure.Details = append(result.Failure.Details, alert.Details...)
+			if result.Failure.Severity == "" {
+				result.Failure.Title = alert.Title
+				result.Failure.Severity = alert.Severity
+			}
+		}
+	}
+
 	if alert := PayloadFailure(result.RawAlerts); alert != nil {
 		result.Failure = &ExecuteFailure{
 			Kind:     alert.Kind,
@@ -311,6 +357,13 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 	}
 
 	return result, nil
+}
+
+func appendExecuteCleanupWarning(result *ExecuteABAPResult, warning string) {
+	if result.Message != "" {
+		result.Message += " "
+	}
+	result.Message += "Cleanup warning: " + warning
 }
 
 // executeWrapperSource builds the throwaway report that the payload runs inside.
@@ -372,6 +425,28 @@ func PayloadFailure(alerts []UnitTestAlert) *UnitTestAlert {
 		}
 	}
 	return fallback
+}
+
+// anyTestMethod reports whether ABAP Unit executed at least one test method.
+// A class refused for its risk level comes back with none.
+func anyTestMethod(classes []UnitTestClass) bool {
+	for _, class := range classes {
+		if len(class.TestMethods) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// anyExecResult reports whether any alert is the closing assertion, that is
+// whether the payload ran to its end.
+func anyExecResult(alerts []UnitTestAlert) bool {
+	for _, a := range alerts {
+		if carriesExecResult(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // carriesExecResult reports whether an alert is the closing assertion that

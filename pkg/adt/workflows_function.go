@@ -136,7 +136,7 @@ func (c *Client) writeFunctionModule(ctx context.Context, group, name, processin
 		return err
 	}
 
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
 		return fmt.Errorf("locking function module %s: %w", strings.ToUpper(name), err)
 	}
@@ -222,7 +222,7 @@ func functionModuleMetadataXML(info *FunctionModuleInfo, processingType string) 
 		strings.ToUpper(info.Name),
 		attrs.String(),
 		strings.ToUpper(info.Group),
-		strings.ToLower(info.Group))
+		url.PathEscape(strings.ToLower(info.Group)))
 }
 
 // CreateFunctionModuleOptions describes a function module to create inside an

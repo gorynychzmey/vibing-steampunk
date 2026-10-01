@@ -10,11 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	openrfc "github.com/oisee/open-rfc-go/rfc"
+
+	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/config"
 	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
@@ -30,7 +33,10 @@ import (
 //	SAP(action="rfc", target="Z_DOUBLE", params={"op":"call","args":{"N":21}})
 //	SAP(action="rfc", target="T000", params={"op":"read_table","fields":["MANDT"],"top":5})
 //
-// Destination overrides: params host / sysnr / port / user.
+// The destination is this server's own gateway. params host / sysnr / port may
+// only name it again: one that differs is refused, because the configured RFC
+// credentials only go to the server's own system. params user picks another
+// RFC logon user on that gateway.
 func (s *Server) routeRFCAction(ctx context.Context, action, objectType, objectName string, params map[string]any) (result *mcp.CallToolResult, handled bool, rfcErr error) {
 	if action != "rfc" {
 		return nil, false, nil
@@ -49,6 +55,29 @@ func (s *Server) routeRFCAction(ctx context.Context, action, objectType, objectN
 			op = "call"
 		default:
 			op = "describe"
+		}
+	}
+
+	// Executing a function module does whatever the module does — post a
+	// document, change a user, start a job — so "call" is gated like
+	// ExecuteABAP, as a workflow operation, which --read-only refuses. It is
+	// checked before logon, so a refused call sends nothing to the gateway.
+	// The other ops only read: system info, ping, the interface metadata,
+	// TFDIR/TADIR/CVERS and RFC_READ_TABLE rows, and RFC_SIMULATE_AUTH_CHECK.
+	if op == "call" {
+		if err := s.adtClient.Safety().CheckOperation(adt.OpWorkflow, "RFCCall"); err != nil {
+			return nil, true, err
+		}
+	}
+	// A caller's WHERE clause goes to RFC_READ_TABLE as written: a free
+	// query on any table, so --block-free-sql refuses it as it refuses
+	// RunQuery. A read without one, and search's own TFDIR filter, stay.
+	switch op {
+	case "read_table", "read-table", "table":
+		if strings.TrimSpace(getStringParam(params, "where")) != "" {
+			if err := s.adtClient.Safety().CheckOperation(adt.OpFreeSQL, "RFCReadTable"); err != nil {
+				return nil, true, err
+			}
 		}
 	}
 
@@ -223,7 +252,7 @@ func (s *Server) dropSharedRFC(ctx context.Context) {
 }
 
 // dialRFC resolves the destination for this server's system, honouring per-call
-// overrides and the RFC settings of the default .vsp.json system.
+// overrides and the RFC settings of this server's .vsp.json system.
 func (s *Server) dialRFC(ctx context.Context, params map[string]any) (*openrfc.Client, error) {
 	dest, err := s.rfcDestination(params)
 	if err != nil {
@@ -237,28 +266,39 @@ func (s *Server) dialRFC(ctx context.Context, params map[string]any) (*openrfc.C
 }
 
 // rfcDestination resolves where an RFC call goes: this server's system, the RFC
-// settings of the default .vsp.json system, and any per-call override.
+// settings of its .vsp.json entry, and any per-call override.
 func (s *Server) rfcDestination(params map[string]any) (saprfc.Params, error) {
+	// The RFC logon defaults to this server's own logon. SAP_USER/SAP_PASSWORD
+	// are consulted only for a server without one (cookie or SSO logon), and
+	// only when SAP_URL and SAP_CLIENT name this very system: a .env in the
+	// working directory usually holds one system's, and every server loads
+	// it, so a server connected to another system would otherwise log on over
+	// RFC as that system's user.
 	in := saprfc.Input{
 		URL:      s.config.BaseURL,
 		User:     s.config.Username,
 		Password: s.config.Password,
 		Client:   s.config.Client,
 		Language: s.config.Language,
-		RFCUser:  os.Getenv("SAP_USER"),
 	}
-	if pwd := os.Getenv("SAP_PASSWORD"); pwd != "" {
-		in.RFCPassword = pwd
+	if in.User == "" && sameSystem(os.Getenv("SAP_URL"), os.Getenv("SAP_CLIENT"), s.config.BaseURL, s.config.Client) {
+		in.User, in.Password = os.Getenv("SAP_USER"), os.Getenv("SAP_PASSWORD")
 	}
-	// Per-system RFC settings from the default .vsp.json system, when present.
-	if cfg, _, err := config.LoadSystems(); err == nil && cfg != nil && cfg.Default != "" {
-		if sys, err := cfg.GetSystem(cfg.Default); err == nil {
+	// Per-system RFC settings of this server's own .vsp.json system. Taking the
+	// default system's instead sent every other server to the default system's
+	// gateway, with the default system's RFC credentials.
+	if cfg, _, err := config.LoadSystems(); err == nil && cfg != nil {
+		name, sys, ok, oerr := s.ownSystem(cfg)
+		if oerr != nil {
+			return saprfc.Params{}, oerr
+		}
+		if ok {
 			in.RFCHost, in.RFCSysnr, in.RFCPort = sys.RFCHost, sys.RFCSysnr, sys.RFCPort
-			if sys.RFCUser != "" {
-				in.RFCUser = sys.RFCUser
-			}
-			if sys.RFCPassword != "" {
-				in.RFCPassword = sys.RFCPassword
+			// The entry as written, not GetSystem's view of it, which fills an
+			// empty rfc_user/rfc_password from SAP_USER/SAP_PASSWORD.
+			in.RFCUser, in.RFCPassword = sys.RFCUser, sys.RFCPassword
+			if in.RFCPassword == "" {
+				in.RFCPassword = os.Getenv(fmt.Sprintf("VSP_%s_RFC_PASSWORD", strings.ToUpper(name)))
 			}
 		}
 	}
@@ -267,7 +307,151 @@ func (s *Server) rfcDestination(params map[string]any) (saprfc.Params, error) {
 	in.UserFlag = getStringParam(params, "user")
 	in.PortFlag = intParam(params, "port", 0)
 
+	// The credentials above belong to this server's own gateway. A per-call
+	// host or sysnr that points anywhere else would carry them there, to a
+	// destination the caller chose, so such a call is refused before any
+	// connection rather than sent the configured password.
+	if err := checkRFCOverride(in); err != nil {
+		return saprfc.Params{}, err
+	}
+
 	return saprfc.Resolve(in)
+}
+
+// checkRFCOverride refuses a per-call host, sysnr or port that makes the
+// destination differ from the one resolved from this server's own settings.
+// Each of them can point the configured credentials somewhere else: another
+// host, another instance on the same host, or another service on a port of
+// the caller's choosing. Naming the server's own destination explicitly is
+// allowed.
+func checkRFCOverride(in saprfc.Input) error {
+	if in.HostFlag == "" && in.SysnrFlag == "" && in.PortFlag == 0 {
+		return nil
+	}
+	host, sysnr := in.RFCHost, in.RFCSysnr
+	if host == "" || sysnr == "" {
+		uHost, uSysnr := saprfc.SysnrFromURL(in.URL)
+		if host == "" {
+			host = uHost
+		}
+		if sysnr == "" {
+			sysnr = uSysnr
+		}
+	}
+	// The destination as saprfc.Resolve builds it: port from the flag, else
+	// rfc_port, else the instance's gateway 3300 + sysnr.
+	dest := func(h, nr string, flagPort int) (string, string, int) {
+		nr = strings.TrimSpace(nr)
+		if nr == "" {
+			nr = "00"
+		}
+		if n, err := strconv.Atoi(nr); err == nil {
+			nr = fmt.Sprintf("%02d", n)
+		}
+		port := flagPort
+		if port == 0 {
+			port = in.RFCPort
+		}
+		if port == 0 {
+			if n, err := strconv.Atoi(nr); err == nil {
+				port = 3300 + n
+			}
+		}
+		return strings.ToLower(strings.TrimSpace(h)), nr, port
+	}
+	ownHost, ownSysnr, ownPort := dest(host, sysnr, 0)
+	wantHost, wantSysnr, wantPort := dest(firstNonEmptyStr(in.HostFlag, host), firstNonEmptyStr(in.SysnrFlag, sysnr), in.PortFlag)
+	if wantHost == ownHost && wantSysnr == ownSysnr && wantPort == ownPort {
+		return nil
+	}
+	return fmt.Errorf("rfc destination override %s/%s port %d is blocked: it differs from this server's own gateway %s/%s port %d, "+
+		"and the configured RFC credentials are not sent to another destination "+
+		"(configure that system in .vsp.json and use a server connected to it)",
+		wantHost, wantSysnr, wantPort, ownHost, ownSysnr, ownPort)
+}
+
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// ownSystem is this server's entry in .vsp.json, as written: the one named by
+// -s / SAP_SYSTEM, otherwise the one entry whose URL and client are this
+// server's. None when there is more than one -- borrowing another system's
+// settings is worse than having none. With no match, a default entry without
+// a URL still applies, as every default did before: an entry that only names
+// a gateway has nothing to match on.
+//
+// A named entry is used only when it has no URL, or its URL and client are
+// this server's. A name that points at another system than SAP_URL/SAP_CLIENT
+// is an error, not a choice between the two: its gateway and RFC credentials
+// would otherwise be used for, or carry this server's logon to, the wrong one.
+func (s *Server) ownSystem(cfg *config.SystemsConfig) (string, config.SystemConfig, bool, error) {
+	if s.config.SystemName != "" {
+		sys, ok := cfg.Systems[s.config.SystemName]
+		if !ok {
+			return "", config.SystemConfig{}, false, nil
+		}
+		if err := NamedSystemMismatch(s.config.SystemName, sys, s.config.BaseURL, s.config.Client); err != nil {
+			return "", config.SystemConfig{}, false, err
+		}
+		return s.config.SystemName, sys, true, nil
+	}
+	found, matches := "", 0
+	for name, sys := range cfg.Systems {
+		if sys.URL == "" || !sameSystem(sys.URL, sys.Client, s.config.BaseURL, s.config.Client) {
+			continue
+		}
+		found, matches = name, matches+1
+	}
+	switch {
+	case matches == 1:
+		return found, cfg.Systems[found], true, nil
+	case matches == 0 && cfg.Default != "":
+		if sys, ok := cfg.Systems[cfg.Default]; ok && sys.URL == "" {
+			return cfg.Default, sys, true, nil
+		}
+	}
+	return "", config.SystemConfig{}, false, nil
+}
+
+// NamedSystemMismatch reports a .vsp.json entry, named by -s / SAP_SYSTEM,
+// whose URL or client is not the system the server is connected to. An entry
+// without a URL (one that only names a gateway) matches any server.
+func NamedSystemMismatch(name string, sys config.SystemConfig, baseURL, client string) error {
+	if sys.URL == "" || sameSystem(sys.URL, sys.Client, baseURL, client) {
+		return nil
+	}
+	orDefault := func(c string) string {
+		if c = strings.TrimSpace(c); c == "" {
+			return defaultSAPClient
+		}
+		return c
+	}
+	return fmt.Errorf("system %q in .vsp.json is %s client %s, but this server is connected to %s client %s: "+
+		"its RFC settings are not used for another system (make -s/SAP_SYSTEM and SAP_URL/SAP_CLIENT name the same system)",
+		name, sys.URL, orDefault(sys.Client), baseURL, orDefault(client))
+}
+
+// defaultSAPClient is the client a logon without one goes to.
+const defaultSAPClient = "001"
+
+// sameSystem says whether two URL/client pairs name one system. An omitted
+// client is the default client, not any client: an entry without one must
+// not lend its gateway or credentials to a server on another client.
+func sameSystem(urlA, clientA, urlB, clientB string) bool {
+	norm := func(u string) string { return strings.ToLower(strings.TrimRight(strings.TrimSpace(u), "/")) }
+	client := func(c string) string {
+		if c = strings.TrimSpace(c); c == "" {
+			return defaultSAPClient
+		}
+		return c
+	}
+	return urlA != "" && norm(urlA) == norm(urlB) && client(clientA) == client(clientB)
 }
 
 func rfcResult(v any) (*mcp.CallToolResult, bool, error) {

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
 
@@ -43,6 +44,16 @@ func (s *Server) routeCRUDAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleCreateTable, params)
 		case "CLONE":
 			return s.callHandler(ctx, s.handleCloneObject, params)
+		case "ENHO":
+			return s.callHandler(ctx, s.handleCreateSourceCodePlugin, params)
+		case "BADI_IMPL":
+			return s.callHandler(ctx, s.handleCreateBadiImplementation, params)
+		case "DOMA":
+			return s.callHandler(ctx, s.handleCreateDomain, withName(params, objectName))
+		case "DTEL":
+			return s.callHandler(ctx, s.handleCreateDataElement, withName(params, objectName))
+		case "STRUCT", "APPEND":
+			return s.callHandler(ctx, s.handleCreateStructure, withName(params, objectName))
 		}
 	}
 
@@ -76,7 +87,9 @@ func (s *Server) handleLockObject(ctx context.Context, request mcp.CallToolReque
 		accessMode = am
 	}
 
-	result, err := s.adtClient.LockObject(ctx, objectURL, accessMode)
+	transport, _ := request.GetArguments()["transport"].(string)
+
+	result, err := s.adtClient.LockObject(ctx, objectURL, accessMode, transport)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to lock object: %v", err)), nil
 	}
@@ -133,8 +146,21 @@ func (s *Server) handleUpdateSource(ctx context.Context, request mcp.CallToolReq
 		sourceURL = objectURL + "/source/main"
 	}
 
-	err := s.withObjectLock(ctx, objectURL, lockHandle, func(handle string) error {
-		return s.adtClient.UpdateSource(ctx, sourceURL, source, handle, transport)
+	updateCtx := ctx
+	if lockHandle == "" {
+		// Resolve and approve the package before acquiring the session-bound
+		// lock. UpdateSource reuses this per-object marker, so it still runs
+		// every policy check but does not issue a stateless SearchObject inside
+		// the LOCK -> PUT -> UNLOCK window (#169).
+		var err error
+		updateCtx, err = s.adtClient.PrepareSourceUpdate(ctx, objectURL, transport)
+		if err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to update source: %v", err)), nil
+		}
+	}
+
+	err := s.withObjectLock(updateCtx, objectURL, lockHandle, transport, func(handle string) error {
+		return s.adtClient.UpdateSource(updateCtx, sourceURL, source, handle, transport)
 	})
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to update source: %v", err)), nil
@@ -233,6 +259,10 @@ func (s *Server) handleCreateObject(ctx context.Context, request mcp.CallToolReq
 		}
 		output, _ := json.MarshalIndent(fmResult, "", "  ")
 		return mcp.NewToolResultText(string(output)), nil
+	}
+
+	if opts.ObjectType == adt.ObjectTypeMessageClass {
+		return s.createMessageClass(ctx, opts, request.GetArguments())
 	}
 
 	err := s.adtClient.CreateObject(ctx, opts)
@@ -563,8 +593,21 @@ func (s *Server) handleDeleteObject(ctx context.Context, request mcp.CallToolReq
 		transport = t
 	}
 
-	err := s.withObjectLockConsumed(ctx, objectURL, lockHandle, func(handle string) error {
-		return s.adtClient.DeleteObject(ctx, objectURL, handle, transport)
+	// When the handler takes its own lock, run DeleteObject's gate first.
+	// Called under the lock, its package lookup is a stateless request that
+	// retires the session the handle belongs to, and the DELETE comes back
+	// 423 (issue #238). A supplied handle was taken in an earlier call, so no
+	// ordering here can protect it; that window is #169.
+	objCtx := ctx
+	if lockHandle == "" {
+		var err error
+		if objCtx, err = s.adtClient.PrepareDelete(ctx, objectURL, transport); err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
+		}
+	}
+
+	err := s.withObjectLockConsumed(objCtx, objectURL, lockHandle, transport, func(handle string) error {
+		return s.adtClient.DeleteObject(objCtx, objectURL, handle, transport)
 	})
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
@@ -589,6 +632,25 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 		return newToolResultError("new_package is required"), nil
 	}
 
+	// Reassigning an object's package changes TADIR: an object change,
+	// refused under --read-only before the WebSocket connects. The
+	// WebSocket client carries no safety config of its own, so the gate is
+	// here, where both routes (edit MOVE, debug MOVE) and the tool meet.
+	if err := s.adtClient.Safety().CheckOperation(adt.OpUpdate, "MoveObject"); err != nil {
+		return newToolResultError(err.Error()), nil
+	}
+	// --allowed-packages covers both ends of the move: the target package,
+	// known without a request, and the package the object is in now, looked
+	// up through the repository search. Without the second, an object could
+	// be moved out of a package the server may not touch into one it may,
+	// and then edited.
+	if err := s.adtClient.Safety().CheckPackage(newPackage); err != nil {
+		return newToolResultError(err.Error()), nil
+	}
+	if err := s.adtClient.CheckObjectPackageByName(ctx, objectType, objectName); err != nil {
+		return newToolResultError(err.Error()), nil
+	}
+
 	// Ensure WebSocket client is connected
 	if err := s.ensureDebugWSClient(ctx); err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to connect to ZADT_VSP WebSocket: %v. Ensure ZADT_VSP is deployed and SAPC/SICF are configured.", err)), nil
@@ -605,4 +667,18 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 			result.Object, result.ObjName, result.NewPackage, result.Message)), nil
 	}
 	return newToolResultError(fmt.Sprintf("Move failed: %s", result.Message)), nil
+}
+
+// withName fills params["name"] from the target ("STRUCT ZDEMO") when the call
+// did not pass it.
+func withName(params map[string]any, objectName string) map[string]any {
+	if objectName == "" || getStringParam(params, "name") != "" {
+		return params
+	}
+	out := make(map[string]any, len(params)+1)
+	for k, v := range params {
+		out[k] = v
+	}
+	out["name"] = objectName
+	return out
 }

@@ -1,6 +1,7 @@
 package adt
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -247,14 +248,7 @@ func (c *Client) CreateTransport(ctx context.Context, objectURL string, descript
 		return "", err
 	}
 
-	owner := strings.ToUpper(c.config.Username)
-
-	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm" tm:useraction="newrequest">
-  <tm:request tm:type="K" tm:desc="%s" tm:target="" tm:cts_project="">
-    <tm:task tm:owner="%s"/>
-  </tm:request>
-</tm:root>`, escapeXMLAttr(description), owner)
+	body := c.newRequestBody("K", description, "", "")
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/cts/transportrequests", &RequestOptions{
 		Method:      http.MethodPost,
@@ -301,33 +295,45 @@ func (c *Client) ReleaseTransport(ctx context.Context, transportNumber string, i
 	return parseReleaseResult(resp.Body)
 }
 
-func parseReleaseResult(data []byte) ([]string, error) {
-	// Extract messages from release result
+// releaseReport is one chkrun:checkReport of a release answer.
+type releaseReport struct {
+	Reporter   string `xml:"reporter,attr"`
+	Status     string `xml:"status,attr"`
+	StatusText string `xml:"statusText,attr"`
+	Messages   []struct {
+		Type string `xml:"type,attr"`
+		Text string `xml:"shortText,attr"`
+	} `xml:"checkMessageList>checkMessage"`
+}
+
+// parseReleaseReports reads the check reports of a release answer. An empty
+// answer has none; one that is there but cannot be read is an error, not
+// "no reports" -- that would read as a release that went through.
+func parseReleaseReports(data []byte) ([]releaseReport, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, nil
+	}
 	xmlStr := string(data)
 	xmlStr = strings.ReplaceAll(xmlStr, "tm:", "")
 	xmlStr = strings.ReplaceAll(xmlStr, "chkrun:", "")
 
-	type message struct {
-		Type string `xml:"type,attr"`
-		Text string `xml:"shortText,attr"`
-	}
-	type report struct {
-		Reporter string    `xml:"reporter,attr"`
-		Status   string    `xml:"status,attr"`
-		Messages []message `xml:"checkMessageList>checkMessage"`
-	}
 	type root struct {
-		Reports []report `xml:"releasereports>checkReport"`
+		Reports []releaseReport `xml:"releasereports>checkReport"`
 	}
-
 	var resp root
 	if err := xml.Unmarshal([]byte(xmlStr), &resp); err != nil {
-		// If parsing fails, return empty
-		return []string{}, nil
+		return nil, fmt.Errorf("the release answer cannot be read (%v), so whether the request was released is unknown; check it in the transport organizer", err)
 	}
+	return resp.Reports, nil
+}
 
+func parseReleaseResult(data []byte) ([]string, error) {
+	reports, err := parseReleaseReports(data)
+	if err != nil {
+		return nil, err
+	}
 	var messages []string
-	for _, r := range resp.Reports {
+	for _, r := range reports {
 		messages = append(messages, fmt.Sprintf("[%s] Status: %s", r.Reporter, r.Status))
 		for _, m := range r.Messages {
 			messages = append(messages, fmt.Sprintf("  [%s] %s", m.Type, m.Text))
@@ -390,6 +396,8 @@ type CreateTransportOptions struct {
 	Package        string
 	TransportLayer string
 	Type           string // "workbench" or "customizing"
+	CTSProject     string // CTS project; empty uses the configured one (WithCTSProject)
+	Target         string // transport target; empty uses the configured one (WithTransportTarget)
 }
 
 // ReleaseTransportOptions for releasing transports
@@ -766,17 +774,7 @@ func (c *Client) CreateTransportV2(ctx context.Context, opts CreateTransportOpti
 		reqType = "W"
 	}
 
-	owner := strings.ToUpper(c.config.Username)
-
-	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm" tm:useraction="newrequest">
-  <tm:request tm:type="%s" tm:desc="%s" tm:target="" tm:cts_project="">
-    <tm:task tm:owner="%s"/>
-  </tm:request>
-</tm:root>`,
-		reqType,
-		escapeXMLAttr(opts.Description),
-		owner)
+	body := c.newRequestBody(reqType, opts.Description, opts.Target, opts.CTSProject)
 
 	query := make(map[string][]string)
 	if opts.TransportLayer != "" {
@@ -795,6 +793,32 @@ func (c *Client) CreateTransportV2(ctx context.Context, opts CreateTransportOpti
 	}
 
 	return parseCreateTransportResponse(resp.Body)
+}
+
+// newRequestBody is the body ADT's transportrequests endpoint takes to create a
+// request with one task for the logged-on user. An empty target or project
+// falls back to the configured one, and to SAP's own default after that.
+//
+// ADT's answer names the project by its external ID, not by the name it stored
+// in E070A (SAP_CTS_PROJECT), which is the record.
+func (c *Client) newRequestBody(reqType, description, target, project string) string {
+	if target == "" {
+		target = c.config.TransportTarget
+	}
+	if project == "" {
+		project = c.config.CTSProject
+	}
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm" tm:useraction="newrequest">
+  <tm:request tm:type="%s" tm:desc="%s" tm:target="%s" tm:cts_project="%s">
+    <tm:task tm:owner="%s"/>
+  </tm:request>
+</tm:root>`,
+		reqType,
+		escapeXMLAttr(description),
+		escapeXMLAttr(target),
+		escapeXMLAttr(project),
+		escapeXMLAttr(strings.ToUpper(c.config.Username)))
 }
 
 // parseCreateTransportResponse extracts the transport number from the XML response.
@@ -858,17 +882,63 @@ func (c *Client) ReleaseTransportV2(ctx context.Context, number string, opts Rel
 		action = "relObjigchkatc"
 	}
 
-	path := fmt.Sprintf("/sap/bc/adt/cts/transportrequests/%s/%s", strings.ToUpper(number), action)
+	number = strings.ToUpper(number)
+	path := fmt.Sprintf("/sap/bc/adt/cts/transportrequests/%s/%s", number, action)
 
-	_, err := c.transport.Request(ctx, path, &RequestOptions{
+	// The answer to a plain release that could not lock everything is a
+	// question ("release anyway?"); relwithignlock is the answer, and ADT
+	// refuses it without the tm:root document its own client sends back.
+	opts2 := &RequestOptions{
 		Method: http.MethodPost,
 		Accept: acceptTransportOrganizerV1,
-	})
+	}
+	if action != "newreleasejobs" {
+		opts2.ContentType = acceptTransportOrganizerV1
+		opts2.Body = []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>`+
+			`<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm" tm:useraction="%s" tm:number="%s"/>`,
+			action, escapeXMLAttr(number)))
+	}
+	resp, err := c.transport.Request(ctx, path, opts2)
 	if err != nil {
 		return fmt.Errorf("releasing transport %s: %w", number, err)
 	}
 
-	return nil
+	reports, err := parseReleaseReports(resp.Body)
+	if err != nil {
+		return fmt.Errorf("releasing transport %s: %w", number, err)
+	}
+	return releaseOutcome(number, reports)
+}
+
+// releaseOutcome turns a release answer into an error unless it says the
+// request was released. ADT answers HTTP 200 either way: a request whose
+// objects are locked elsewhere comes back with status relwithignlock and the
+// locks listed, and nothing is released. An answer with no report at all
+// keeps the old reading, success on the HTTP status alone.
+func releaseOutcome(number string, reports []releaseReport) error {
+	if len(reports) == 0 {
+		return nil
+	}
+	var details []string
+	for _, r := range reports {
+		if r.Status == "released" {
+			return nil
+		}
+		if t := strings.TrimSpace(strings.Join(strings.Fields(r.StatusText), " ")); t != "" {
+			details = append(details, t)
+		}
+		for _, m := range r.Messages {
+			details = append(details, fmt.Sprintf("[%s] %s", m.Type, m.Text))
+		}
+	}
+	msg := fmt.Sprintf("transport %s was not released (status %s)", number, reports[0].Status)
+	if len(details) > 0 {
+		msg += ": " + strings.Join(details, "; ")
+	}
+	if reports[0].Status == "relwithignlock" {
+		msg += " -- to release it anyway, repeat with ignore_locks"
+	}
+	return fmt.Errorf("%s", msg)
 }
 
 // DeleteTransport deletes a transport request

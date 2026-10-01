@@ -230,17 +230,15 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 		opts.Mode = WriteModeUpsert
 	}
 
-	// Top-level mutation gate. The precise package check runs in the
-	// delegated create/update path (CreateAndActivate* / WriteProgram /
-	// WriteClass) because the target package is known there; here we
-	// enforce op-type and transportable-edit policy up front so the caller
-	// gets a clear early rejection.
-	if err := c.checkMutation(ctx, MutationContext{
-		Op:        OpWorkflow,
-		OpName:    "WriteSource",
-		Package:   opts.Package, // empty for update path, present for create
-		Transport: opts.Transport,
-	}); err != nil {
+	// The target package has different meanings on the two branches. For a
+	// create it is caller input; for an update it must be resolved from the
+	// existing object's ADT metadata. Do only the local policy checks here,
+	// before upsert decides which branch it is taking. In particular, never
+	// let a supplied package authorise an update of an existing object.
+	if err := c.checkSafety(OpWorkflow, "WriteSource"); err != nil {
+		return nil, err
+	}
+	if err := c.checkTransportableEdit(opts.Transport, "WriteSource"); err != nil {
 		return nil, err
 	}
 
@@ -372,13 +370,67 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 
 	// Execute create or update workflow
 	if actualMode == WriteModeCreate {
+		// Creation has no existing object to resolve, so this is the one branch
+		// where the explicit package is the policy input.
+		if err := c.checkMutation(ctx, MutationContext{
+			Op:        OpWorkflow,
+			OpName:    "WriteSource",
+			Package:   opts.Package,
+			Transport: opts.Transport,
+		}); err != nil {
+			return nil, err
+		}
 		return c.writeSourceCreate(ctx, objectType, name, source, opts)
 	} else {
+		// Existing objects are checked by their actual ADT URL, before any
+		// delegated workflow can acquire a lock. The marker then prevents the
+		// lower-level writer from repeating that stateless lookup in its lock
+		// window (#91/#169).
+		objectURL, ok := writeSourceUpdateObjectURL(objectType, name)
+		if ok {
+			var err error
+			ctx, err = c.gateAndMark(ctx, MutationContext{
+				Op:        OpWorkflow,
+				OpName:    "WriteSource",
+				ObjectURL: objectURL,
+				Transport: opts.Transport,
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
 		updated, err := c.writeSourceUpdate(ctx, objectType, name, source, opts)
 		if err != nil || opts.ExpectedSourceHash == "" || !updated.Success {
 			return updated, err
 		}
 		return c.verifyWriteSourceResult(ctx, updated, source, opts)
+	}
+}
+
+// writeSourceUpdateObjectURL returns the repository URL for update branches
+// that WriteSource delegates to. FUNC derives its function group before it can
+// construct its URL, so WriteFunctionModule performs the same gate after that
+// resolution and before its lock.
+func writeSourceUpdateObjectURL(objectType, name string) (string, bool) {
+	switch objectType {
+	case "PROG":
+		return fmt.Sprintf("/sap/bc/adt/programs/programs/%s", url.PathEscape(name)), true
+	case "CLAS":
+		return fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(name)), true
+	case "INTF":
+		return fmt.Sprintf("/sap/bc/adt/oo/interfaces/%s", url.PathEscape(name)), true
+	case "INCL":
+		return fmt.Sprintf("/sap/bc/adt/programs/includes/%s", url.PathEscape(name)), true
+	case "DDLS":
+		return GetObjectURL(ObjectTypeDDLS, name, ""), true
+	case "BDEF":
+		return GetObjectURL(ObjectTypeBDEF, name, ""), true
+	case "SRVD":
+		return GetObjectURL(ObjectTypeSRVD, name, ""), true
+	case "TABL":
+		return GetObjectURL(ObjectTypeTable, name, ""), true
+	default:
+		return "", false
 	}
 }
 
@@ -560,7 +612,7 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		result.SyntaxErrors = syntaxErrors
 
 		// Lock
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 			return result, nil
@@ -657,7 +709,7 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			sourceURL := objectURL + "/source/main"
 
 			// Lock
-			lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+			lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
 			if err != nil {
 				result.Message = fmt.Sprintf("Failed to lock BDEF: %v", err)
 				return result, nil
@@ -666,9 +718,12 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			// Update source
 			err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, opts.Transport)
 			if err != nil {
-				// Unlock on failure
-				_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-				result.Message = fmt.Sprintf("Failed to update BDEF source: %v", err)
+				// Unlock on failure, detached from ctx's cancellation (issue #91/#166).
+				if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+					result.Message = fmt.Sprintf("Failed to update BDEF source: %v — %s", err, strandedLockAdvice(objectURL, unlockErr))
+				} else {
+					result.Message = fmt.Sprintf("Failed to update BDEF source: %v", err)
+				}
 				return result, nil
 			}
 
@@ -714,7 +769,7 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		result.SyntaxErrors = syntaxErrors
 
 		// Lock
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 			return result, nil
@@ -927,7 +982,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 
 			// Lock for test update
 			trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
-			lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+			lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
 			if err != nil {
 				result.Message += fmt.Sprintf(" (Warning: Failed to lock for test update: %v)", err)
 				return result, nil
@@ -1019,7 +1074,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 
 		// Lock
 		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 			return result, nil
@@ -1125,7 +1180,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 
 		// Lock
 		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 			return result, nil
@@ -1197,7 +1252,13 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 
 	className = strings.ToUpper(className)
 	methodName = strings.ToUpper(methodName)
-	objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(strings.ToLower(className)))
+	var urlName string
+	if strings.Contains(className, "/") {
+		urlName = strings.ToUpper(className)
+	} else {
+		urlName = strings.ToLower(className)
+	}
+	objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(urlName))
 	result.ObjectURL = objectURL
 
 	// Full gate up front, so UpdateSource does not repeat the networked
@@ -1277,7 +1338,7 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 
 	// Lock
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock class: %v", err)
 		return result, nil

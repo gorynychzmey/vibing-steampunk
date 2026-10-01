@@ -34,7 +34,8 @@ S/4, AMDP needs HANA, and some ADT resources present on S/4 are absent on ERP.
 >   and a hint after every program create that names the fields still without one; the
 >   [description set without touching the source](#the-description-and-the-binary-itself).
 > - **`vsp update`** — the release for this platform, verified against `checksums.txt`,
->   renamed into place of the running binary.
+>   renamed into place of the running binary, from the repository the binary was built
+>   for (`--repo owner/name` to point elsewhere).
 > - **[A response cache](#response-cache)** that turns a 4-second `slim` into 10 ms, on
 >   Go-native SQLite when it should outlive the process.
 >
@@ -403,6 +404,17 @@ carries `transport` and, when the choice was made here, `transportNote`.
 `--transport-choice off` (or `SAP_TRANSPORT_CHOICE=off`) restores the old
 behaviour.
 
+**A request filed under a CTS project.** Systems that organise their requests
+in CTS projects expect each request to carry one. Where the project is
+mandatory, ADT refuses a request without it — *Change requests must be
+assigned to a project* — so vsp could not create a request there at all, and
+elsewhere it created one outside any project. `--cts-project` and `--transport-target`
+(`SAP_CTS_PROJECT`, `SAP_TRANSPORT_TARGET`, or `cts_project` /
+`transport_target` per system in `.vsp.json`) now apply to every request vsp
+creates, the automatic one above included; `create_transport` also takes
+`cts_project` and `target` per call. ADT's answer names the project by its
+external ID, not the name it stored — E070A (`SAP_CTS_PROJECT`) is the record.
+
 **Merging requests, moving an entry** is SE09's Utilities → Reorganize and
 nothing in ADT — the organizer's resources add objects and release, none
 removes an entry — and the function modules behind SE09 are not
@@ -415,19 +427,37 @@ SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport merge TR-A TR-B --into TR-C     
 SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport move "PROG ZDEMO_RUN" --from TR-A --to TR-B
 ```
 
-MCP: `system` with `merge_transports` (`source`, `target`) and
-`move_transport_object` (`object`, `from`, `to`). Both need ZADT_VSP on the
+Adding an entry nobody edits -- a `LIMU REPT` for a report's texts, a `TABU`
+with the keys of the customizing rows it carries -- and taking one out go the
+same way:
+
+```bash
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport add TR-A "LIMU REPT ZDEMO" "R3TR PROG ZDEMO2"
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport add TR-A "R3TR TABU ZDEMO_CONF" --key 100KEY1 --key "100KEY2*"
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport remove TR-A "PROG ZDEMO"
+```
+
+MCP: `system` with `merge_transports` (`source`, `target`),
+`move_transport_object` (`object`, `from`, `to`), `add_transport_object`
+(`transport`, `objects` or `object` + `keys`) and `remove_transport_object`
+(`transport`, `object`). All need ZADT_VSP on the
 system — redeploy it after this release, the bridge changed.
 
 `vsp update` fetches the latest release for this platform, compares it with
 the running version, verifies the download against the release's
 `checksums.txt`, and puts it in place of the running binary — the old one is
 renamed aside first, which is what Windows allows for a running executable.
+The release comes from the repository the binary was built for: these
+releases are `github.com/oisee/vibing-steampunk`, and a fork's own releases
+update from that fork; a local `make build` carries no stamp and uses the
+default. `--repo owner/name` points at a different repository
+for one run.
 
 ```bash
-vsp update --check                                   # vsp 2.56.0, latest is 2.57.0: update available
+vsp update --check                                   # vsp 2.56.0, latest in oisee/vibing-steampunk is 2.57.0 (vsp-linux-amd64): update available
 vsp update                                           # download, verify, replace
 vsp update --version v2.55.0 --force                 # a particular release, newer or not
+vsp update --repo myorg/vibing-steampunk --check     # a different fork's releases
 ```
 
 ### Cluster tables, decoded — BALDAT, INDX, STXL over plain ADT
@@ -593,7 +623,13 @@ The destination is derived from the system you already configured: host from the
 URL, system number from its port, gateway port `3300 + sysnr`. Override per system in
 `.vsp.json` (`rfc_host`, `rfc_sysnr`, `rfc_port`) or per command (`--rfc-host`,
 `--sysnr`, `--port`). RFC logon uses `rfc_user`/`rfc_password`, else `SAP_USER`/
-`SAP_PASSWORD`, else the system's own credentials.
+`SAP_PASSWORD`, else the system's own credentials. An MCP server takes the RFC
+settings of its own system (the one named by `-s`/`SAP_SYSTEM`, else the entry whose
+URL and client match its own; a named entry whose URL or client is not the server's
+is refused), and logs on with that entry's `rfc_user`/`rfc_password`,
+else its own credentials. `SAP_USER`/`SAP_PASSWORD` are used only by a server without
+credentials of its own (cookie or SSO logon), and only when `SAP_URL` and
+`SAP_CLIENT` name its system.
 
 In MCP it is one more action on the single `SAP` tool — the tool space stays as small
 as it was:
@@ -763,6 +799,57 @@ Earlier: **[Still Only 5%](articles/2026-08-25-still-five-percent.md)** · **[VS
 ## What's New
 
 The headline changes are in the **"New in the last three releases"** callout at the top of this README; the full version history is in [CHANGELOG.md](CHANGELOG.md). Latest release: **[v2.57.0 — the dump's own why](https://github.com/oisee/vibing-steampunk/releases/tag/v2.57.0)**.
+
+### Unreleased — behaviour changes since v2.58.0
+
+**`--read-only` now also refuses**, each before anything reaches SAP:
+
+- transport writes (create, release, delete, merge, move, entry add/remove),
+  even with `--enable-transports`;
+- gCTS create, delete, clone, pull, commit and switch-branch;
+- code execution: `SAP(action="rfc")` `call`, `CallRFC` (`debug CALL_RFC`),
+  `RunReport` / `RunReportAsync`, and unit test and code coverage runs
+  (`RunUnitTests`, `GetCodeCoverage`) that include dangerous or critical tests
+  (`include_dangerous`). Ordinary runs still work;
+- object and system changes: `SetTextElements`, `MoveObject` (`edit MOVE`,
+  `debug MOVE`), publishing and unpublishing service bindings,
+  `SetPrettyPrinterSettings`, and every lock except a READ lock
+  (`LockObject`, `edit LOCK`);
+- debugger variable writes through the ADT client (`DebuggerSetVariableValue`).
+
+**The CLI honours `read_only` in `.vsp.json` and `SAP_READ_ONLY`** for
+`vsp rfc call`, `rfc run`, `rfc adt` with a method other than GET/HEAD/OPTIONS,
+`vsp trace run --call`, `vsp trace unit --call`, the Run button of
+`vsp debug ui`, `run` and `call` in the `vsp debug` REPL, `eset` and
+writing `adt` requests in the `vsp rfc debug` / `vsp adt debug` REPLs, and the
+`vsp lua` bindings that overwrite variables (`setVariable`, `injectCheckpoint`,
+`forceReplay`, `replayFromStep`).
+
+**`--block-free-sql`** (and `block_free_sql` / `SAP_BLOCK_FREE_SQL` on the
+CLI) refuses `rfc read_table` / `vsp rfc read-table` with a caller's WHERE.
+Reads without one, and `search`, are unchanged.
+
+**RFC goes only to the server's own system.** When `-s` / `SAP_SYSTEM` names a
+`.vsp.json` entry whose `url`/`client` differ from `SAP_URL`/`SAP_CLIENT`, the
+server warns at startup and refuses RFC use. An entry without a `url` (gateway
+only) still applies. A per-call `host`, `sysnr` or `port` on
+`SAP(action="rfc")` that differs from the server's own gateway is refused, so
+the configured RFC credentials never go to a caller-chosen destination.
+
+**Known gaps** (not gated by `--read-only` yet): setting and deleting
+breakpoints, debugger stepping, starting an AMDP debug session, arming and
+removing traces (`vsp trace run` without `--call`, `vsp trace rm`), and the
+per-call RFC `user` override, which can still try other users' logons with the
+configured password and so risks locking an account. The name mask of
+`rfc search` is not escaped. `vsp rfc adt POST` is checked as a workflow
+operation (`W`), while `vsp adt request` checks the same kind of request as an
+update (`U`). Both are refused under read-only, but they use different
+operation letters.
+
+**Build and transport:** `go.mod` pins `toolchain go1.26.8`. mcp-go v1.1.0
+answers 403 to a request from a loopback address that carries a non-loopback
+`Host` header (DNS-rebinding protection), so a reverse proxy on the same host
+must rewrite `Host` to reach vsp over HTTP.
 
 ### Hyperfocused Mode — 1 Tool to Rule Them All (Recommended)
 
@@ -1155,6 +1242,7 @@ vsp -s a4h docs img "cleanup job"                    # where in the IMG, and whi
 vsp -s a4h texts set ZDEMO_RUN P_DEVC="Package to scan"  # selection texts, a plan first
 vsp -s a4h description ZDEMO_RUN "What the report does"  # SE38's title, without touching the source
 vsp update                                           # the latest release, verified, in place of this binary
+vsp update --repo owner/name                         # from a different repository than the one this build was released from
 
 # Cluster tables — what only IMPORT could read, decoded here
 vsp -s a4h cluster read INDX --where "relid = 'ZV'" --schema
@@ -1897,7 +1985,7 @@ Uses **ABAP SQL syntax**, not standard SQL:
 make build          # Current platform
 make build-all      # All 9 platforms
 
-# Test
+# Test (go.mod pins toolchain go1.26.8)
 go test ./...                              # Unit tests (1354)
 go test -tags=integration -v ./pkg/adt/    # Integration tests (34+)
 ```
