@@ -404,6 +404,17 @@ carries `transport` and, when the choice was made here, `transportNote`.
 `--transport-choice off` (or `SAP_TRANSPORT_CHOICE=off`) restores the old
 behaviour.
 
+**A request filed under a CTS project.** Systems that organise their requests
+in CTS projects expect each request to carry one. Where the project is
+mandatory, ADT refuses a request without it — *Change requests must be
+assigned to a project* — so vsp could not create a request there at all, and
+elsewhere it created one outside any project. `--cts-project` and `--transport-target`
+(`SAP_CTS_PROJECT`, `SAP_TRANSPORT_TARGET`, or `cts_project` /
+`transport_target` per system in `.vsp.json`) now apply to every request vsp
+creates, the automatic one above included; `create_transport` also takes
+`cts_project` and `target` per call. ADT's answer names the project by its
+external ID, not the name it stored — E070A (`SAP_CTS_PROJECT`) is the record.
+
 **Merging requests, moving an entry** is SE09's Utilities → Reorganize and
 nothing in ADT — the organizer's resources add objects and release, none
 removes an entry — and the function modules behind SE09 are not
@@ -612,7 +623,12 @@ The destination is derived from the system you already configured: host from the
 URL, system number from its port, gateway port `3300 + sysnr`. Override per system in
 `.vsp.json` (`rfc_host`, `rfc_sysnr`, `rfc_port`) or per command (`--rfc-host`,
 `--sysnr`, `--port`). RFC logon uses `rfc_user`/`rfc_password`, else `SAP_USER`/
-`SAP_PASSWORD`, else the system's own credentials.
+`SAP_PASSWORD`, else the system's own credentials. An MCP server takes the RFC
+settings of its own system (the one named by `-s`/`SAP_SYSTEM`, else the entry whose
+URL and client match its own), and logs on with that entry's `rfc_user`/`rfc_password`,
+else its own credentials. `SAP_USER`/`SAP_PASSWORD` are used only by a server without
+credentials of its own (cookie or SSO logon), and only when `SAP_URL` and
+`SAP_CLIENT` name its system.
 
 In MCP it is one more action on the single `SAP` tool — the tool space stays as small
 as it was:

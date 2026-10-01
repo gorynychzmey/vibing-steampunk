@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/oisee/vibing-steampunk/pkg/saprfc"
@@ -61,5 +63,30 @@ func TestReportParams_Refusals(t *testing.T) {
 	}
 	if got, err := reportParams(nil); err != nil || got != nil {
 		t.Errorf("no params: %v, %v", got, err)
+	}
+}
+
+// run starts a background job that does whatever the report does, so the
+// safety configuration refuses it like ExecuteABAP, before any connection.
+func TestRouteRFCAction_RunIsRefusedUnderTheSafetyConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"read-only", Config{ReadOnly: true}},
+		{"workflow ops disallowed", Config{DisallowedOps: "W"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			cfg.BaseURL, cfg.Username, cfg.Password, cfg.Client = "https://unreachable.invalid:44300", "u", "p", "100"
+			server := NewServer(&cfg)
+			_, handled, err := server.routeRFCAction(context.Background(), "rfc", "ZREPORT", "", map[string]any{"op": "run"})
+			if !handled {
+				t.Fatal("rfc action not handled")
+			}
+			if err == nil || !strings.Contains(err.Error(), "blocked by safety configuration") {
+				t.Fatalf("want run refused by the safety configuration, got %v", err)
+			}
+		})
 	}
 }
