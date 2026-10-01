@@ -483,6 +483,9 @@ func (s *Server) handleCopyToTransportOfCopies(ctx context.Context, request mcp.
 	if source == "" || opts.Target == "" {
 		return newToolResultError("transport (the request to copy) and target (system or /GROUP/) are required"), nil
 	}
+	if err := s.adtClient.CheckTransportOfCopies(source); err != nil {
+		return newToolResultError(err.Error()), nil
+	}
 	if err := s.ensureDebugWSClient(ctx); err != nil {
 		return newToolResultError(fmt.Sprintf("copying a request's objects needs ZADT_VSP's function bridge: %v", err)), nil
 	}

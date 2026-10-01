@@ -66,10 +66,7 @@ func (c *Client) copyToTransportOfCopies(ctx context.Context, bridge functionBri
 	if target == "" {
 		return nil, fmt.Errorf("a target is required: the system (QAS) or target group (/GROUP/) the copy is for")
 	}
-	if err := c.config.Safety.CheckTransport(source, "CopyToTransportOfCopies", false); err != nil {
-		return nil, err
-	}
-	if err := c.config.Safety.CheckTransport("", "CopyToTransportOfCopies", true); err != nil {
+	if err := c.CheckTransportOfCopies(source); err != nil {
 		return nil, err
 	}
 
@@ -131,6 +128,21 @@ func (c *Client) copyToTransportOfCopies(ctx context.Context, bridge functionBri
 		res.Released = true
 	}
 	return res, nil
+}
+
+// CheckTransportOfCopies runs the policy checks a transport of copies of
+// source needs before anything is sent: transports enabled and not read-only
+// (a new request is created), the operation allowed, and source readable
+// under the transport whitelist. It sends nothing.
+func (c *Client) CheckTransportOfCopies(source string) error {
+	const op = "CopyToTransportOfCopies"
+	if err := c.checkSafety(OpTransport, op); err != nil {
+		return err
+	}
+	if err := c.config.Safety.CheckTransport("", op, true); err != nil {
+		return err
+	}
+	return c.config.Safety.CheckTransport(strings.ToUpper(strings.TrimSpace(source)), op, false)
 }
 
 // copySources names what TR_COPY_COMM has to copy from. It copies only the
