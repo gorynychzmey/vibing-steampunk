@@ -103,6 +103,20 @@ define structure zdemo {
   zzflag : abap_boolean;
 }"})
       (name and base come from the DDL; activation is checked against the inactive list)
+  SAP(action="create", target="DOMA ZDEMO", params={"description": "Demo", "package": "$TMP", "data_type": "CHAR", "length": 2,
+      "fixed_values": [{"low": "A", "text": "Alpha"}]})   ("decimals", "output_length", "lowercase", "signed", "conversion_exit", "value_table")
+  SAP(action="create", target="DTEL ZDEMO", params={"description": "Demo", "package": "$TMP", "domain": "ZDEMO",
+      "short_label": "Demo", "medium_label": "Demo field", "long_label": "Demo field", "heading": "Demo"})   (or "data_type" + "length"; "search_help", "parameter_id")
+
+Enhancement implementation (source code plug-in, ENHO): list the options, then create one --
+  SAP(action="read", target="ENHANCEMENT_OPTIONS", params={"function_module": "BAPI_X"})   (or object_url, function_group, program, class; "filter")
+  SAP(action="create", target="ENHO", params={"name": "ZENH_DEMO", "description": "Demo", "package": "ZPKG", "transport": "A4HK900001",
+      "function_module": "BAPI_X", "option": "\\FU:BAPI_X\\SE:BEGIN\\EI", "source": "ENHANCEMENT 1  .\n  ...\nENDENHANCEMENT."})
+  Without "source" it is created inactive with an empty ENHANCEMENT block; with it the code is written and activated.
+
+BAdI implementation (ENHO): the implementing class must exist and implement the BAdI interface --
+  SAP(action="create", target="BADI_IMPL", params={"name": "ZENH_DEMO", "description": "Demo", "package": "ZPKG", "transport": "A4HK900001",
+      "spot": "BADI_X", "class": "ZCL_DEMO_BADI"})   ("badi" if the spot has several; "active": false = switched off; "activate": false)
 
 Class test include:
   SAP(action="create", target="CLAS_TEST_INCLUDE", params={"class_name": "ZCL_TEST", "lock_handle": "..."})
@@ -491,6 +505,7 @@ Transports:
   SAP(action="system", params={"type": "list_transports", "request_status": "R", "released_from": "20260101", "released_to": "20261231"})
   SAP(action="system", params={"type": "get_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "create_transport", "description": "...", "package": "$TMP"})
+  SAP(action="system", params={"type": "create_transport", "description": "...", "package": "ZDEMO", "cts_project": "PRJ_DEMO", "target": "/GROUP/"})  - filed under a CTS project (default: --cts-project)
   SAP(action="system", params={"type": "release_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "import_transport", "transport": "A4HK900001", "client": "100"})  - import into THIS system, as STMS_IMPORT (classic RFC; needs allow_transport_import)
       waits up to "timeout" seconds (default 3600); "async": true returns a task_id at once --
