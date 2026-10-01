@@ -43,6 +43,14 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 	params.Set("_action", "LOCK")
 	params.Set("accessMode", accessMode)
 
+	// The window opens when the handle is recorded, after the response is in.
+	// Until then, count the LOCK as a stateful request under way, so no
+	// stateless request ends the context between the two (see Transport.do).
+	if c.transport != nil {
+		c.transport.contextInFlight.Add(1)
+		defer c.transport.contextInFlight.Add(-1)
+	}
+
 	resp, err := c.transport.Request(ctx, objectURL, &RequestOptions{
 		Method:   http.MethodPost,
 		Query:    params,
@@ -164,6 +172,15 @@ func (c *Client) UnlockObject(ctx context.Context, objectURL string, lockHandle 
 		Stateful: true, // Must match lock session (issue #88)
 	})
 	if err != nil {
+		// Under cookie-file recovery, an expired session answering the
+		// unlock means the session holding the lock is gone, and the enqueue
+		// with it. Keeping the handle would refuse every later recovery until
+		// the entry ages out.
+		var apiErr *APIError
+		if c.config != nil && c.config.ReauthReadOnly && errors.As(err, &apiErr) &&
+			(apiErr.IsSessionExpired() || apiErr.StatusCode == http.StatusUnauthorized) {
+			c.noteLockClosed(lockHandle)
+		}
 		return fmt.Errorf("unlocking object: %w", err)
 	}
 
@@ -526,6 +543,22 @@ func (c *Client) cleanupPartialObject(ctx context.Context, objectURL, pkg, trans
 		Transport: transport,
 	}
 
+	// Step 0: run DeleteObject's gate here, before any lock. Inside the lock
+	// window its package lookup is a stateless request that retires the
+	// session the handle belongs to, and the DELETE comes back 423
+	// (issue #238). Gating first also means an object outside the allowlist
+	// is refused before it is ever locked, rather than locked and then refused.
+	ctx, gateErr := c.PrepareDelete(ctx, objectURL, transport)
+	if gateErr != nil {
+		pce.CleanupActions = append(pce.CleanupActions,
+			fmt.Sprintf("delete refused by the mutation gate: %v", gateErr))
+		pce.ManualSteps = []string{
+			"check that the object's package is covered by --allowed-packages",
+			"otherwise delete the object manually via SE80",
+		}
+		return pce
+	}
+
 	// Step 1: orphan lock cleanup (cheap; reuses the existing helper).
 	c.tryCleanupOrphanLock(ctx, objectURL)
 	pce.CleanupActions = append(pce.CleanupActions, "tried orphan-lock cleanup")
@@ -722,10 +755,7 @@ func (c *Client) CreateObject(ctx context.Context, opts CreateObjectOptions) err
 	}
 
 	// Build creation URL
-	creationURL := typeInfo.creationPath
-	if opts.ObjectType == ObjectTypeFunctionMod && opts.ParentName != "" {
-		creationURL = fmt.Sprintf(typeInfo.creationPath, strings.ToUpper(opts.ParentName))
-	}
+	creationURL := creationURLFor(opts, typeInfo)
 
 	// Build request body with current user as default responsible
 	defaultResponsible := c.config.Username
@@ -782,6 +812,17 @@ func (c *Client) CreateObject(ctx context.Context, opts CreateObjectOptions) err
 	}
 
 	return nil
+}
+
+// creationURLFor is the collection a new object is POSTed to. A function
+// module's is inside its group, and a namespaced group ("/NS/GROUP") has to be
+// escaped like every other object URL, or the POST goes to
+// .../groups//NS/GROUP/fmodules and comes back 404.
+func creationURLFor(opts CreateObjectOptions, typeInfo objectTypeInfo) string {
+	if opts.ObjectType == ObjectTypeFunctionMod && opts.ParentName != "" {
+		return fmt.Sprintf(typeInfo.creationPath, url.PathEscape(strings.ToLower(opts.ParentName)))
+	}
+	return typeInfo.creationPath
 }
 
 func buildCreateObjectBody(opts CreateObjectOptions, typeInfo objectTypeInfo, defaultResponsible string) string {
@@ -852,7 +893,7 @@ func buildCreateObjectBody(opts CreateObjectOptions, typeInfo objectTypeInfo, de
 			opts.ObjectType,
 			responsible,
 			strings.ToUpper(opts.ParentName),
-			strings.ToLower(opts.ParentName),
+			url.PathEscape(strings.ToLower(opts.ParentName)),
 			typeInfo.rootName)
 	}
 
@@ -1001,6 +1042,12 @@ func (c *Client) DeleteObject(ctx context.Context, objectURL string, lockHandle 
 	// A delete consumes the handle without an UNLOCK ever being sent, which is
 	// how a lock-window counter ends up permanently non-zero.
 	c.noteLockClosed(lockHandle)
+
+	// The DELETE consumed the handle, but the ENQUEUE the LOCK took lives on
+	// with the stateful context. Behind a session-holding proxy that context
+	// outlives the chain, and SM12 keeps showing a lock on an object that no
+	// longer exists. Retire the context the way UnlockObject does.
+	c.transport.ReleaseProxyContext(ctx)
 
 	return nil
 }
