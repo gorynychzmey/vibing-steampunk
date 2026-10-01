@@ -159,3 +159,22 @@ func TestRFCDestination_AURLlessDefaultStillApplies(t *testing.T) {
 		t.Errorf("host = %q, want the URL-less default's gw.example.local", dest.Host)
 	}
 }
+
+// An omitted client is the default client, not a wildcard.
+func TestSameSystem_OmittedClientIsTheDefault(t *testing.T) {
+	for _, c := range []struct {
+		ua, ca, ub, cb string
+		want           bool
+	}{
+		{"https://dev.example.local/", "100", "https://DEV.example.local", "100", true},
+		{"https://dev.example.local", "", "https://dev.example.local", "001", true},
+		{"https://dev.example.local", "", "https://dev.example.local", "100", false},
+		{"https://dev.example.local", "100", "https://dev.example.local", "", false},
+		{"https://dev.example.local", "100", "https://prodsys-a.example", "100", false},
+		{"", "", "https://dev.example.local", "", false},
+	} {
+		if got := sameSystem(c.ua, c.ca, c.ub, c.cb); got != c.want {
+			t.Errorf("sameSystem(%q,%q,%q,%q) = %v, want %v", c.ua, c.ca, c.ub, c.cb, got, c.want)
+		}
+	}
+}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	openrfc "github.com/oisee/open-rfc-go/rfc"
+
 	"github.com/oisee/vibing-steampunk/pkg/config"
 	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
@@ -240,15 +241,20 @@ func (s *Server) dialRFC(ctx context.Context, params map[string]any) (*openrfc.C
 // settings of its .vsp.json entry, and any per-call override.
 func (s *Server) rfcDestination(params map[string]any) (saprfc.Params, error) {
 	// The RFC logon defaults to this server's own logon. SAP_USER/SAP_PASSWORD
-	// are not consulted: a .env in the working directory usually holds one
-	// system's, and every server loads it, so a server connected to another
-	// system would log on over RFC as that system's user.
+	// are consulted only for a server without one (cookie or SSO logon), and
+	// only when SAP_URL and SAP_CLIENT name this very system: a .env in the
+	// working directory usually holds one system's, and every server loads
+	// it, so a server connected to another system would otherwise log on over
+	// RFC as that system's user.
 	in := saprfc.Input{
 		URL:      s.config.BaseURL,
 		User:     s.config.Username,
 		Password: s.config.Password,
 		Client:   s.config.Client,
 		Language: s.config.Language,
+	}
+	if in.User == "" && sameSystem(os.Getenv("SAP_URL"), os.Getenv("SAP_CLIENT"), s.config.BaseURL, s.config.Client) {
+		in.User, in.Password = os.Getenv("SAP_USER"), os.Getenv("SAP_PASSWORD")
 	}
 	// Per-system RFC settings of this server's own .vsp.json system. Taking the
 	// default system's instead sent every other server to the default system's
@@ -283,13 +289,9 @@ func (s *Server) ownSystem(cfg *config.SystemsConfig) (string, config.SystemConf
 		sys, ok := cfg.Systems[s.config.SystemName]
 		return s.config.SystemName, sys, ok
 	}
-	norm := func(u string) string { return strings.ToLower(strings.TrimRight(strings.TrimSpace(u), "/")) }
 	found, matches := "", 0
 	for name, sys := range cfg.Systems {
-		if sys.URL == "" || norm(sys.URL) != norm(s.config.BaseURL) {
-			continue
-		}
-		if sys.Client != "" && s.config.Client != "" && sys.Client != s.config.Client {
+		if sys.URL == "" || !sameSystem(sys.URL, sys.Client, s.config.BaseURL, s.config.Client) {
 			continue
 		}
 		found, matches = name, matches+1
@@ -303,6 +305,23 @@ func (s *Server) ownSystem(cfg *config.SystemsConfig) (string, config.SystemConf
 		}
 	}
 	return "", config.SystemConfig{}, false
+}
+
+// defaultSAPClient is the client a logon without one goes to.
+const defaultSAPClient = "001"
+
+// sameSystem says whether two URL/client pairs name one system. An omitted
+// client is the default client, not any client: an entry without one must
+// not lend its gateway or credentials to a server on another client.
+func sameSystem(urlA, clientA, urlB, clientB string) bool {
+	norm := func(u string) string { return strings.ToLower(strings.TrimRight(strings.TrimSpace(u), "/")) }
+	client := func(c string) string {
+		if c = strings.TrimSpace(c); c == "" {
+			return defaultSAPClient
+		}
+		return c
+	}
+	return urlA != "" && norm(urlA) == norm(urlB) && client(clientA) == client(clientB)
 }
 
 func rfcResult(v any) (*mcp.CallToolResult, bool, error) {
