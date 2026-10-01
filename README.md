@@ -436,8 +436,9 @@ vsp -s qas transport import TR-A                  # into qas, its own client
 vsp -s qas transport import TR-A --client 200 --json
 ```
 
-MCP: `system` with `import_transport` (`transport`, optional `client`, `host`
-to override the RFC gateway).
+MCP: `system` with `import_transport` (`transport`, optional `client`). It
+always goes to the server's own system: per-call `host`, `sysnr`, `port` and
+`user` are refused, and the gateway comes from the system's `.vsp.json` entry.
 
 `vsp update` fetches the latest release for this platform, compares it with
 the running version, verifies the download against the release's

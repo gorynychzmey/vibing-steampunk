@@ -40,6 +40,15 @@ func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallTool
 	if secs := intParam(args, "timeout", 0); secs > 0 {
 		timeout = time.Duration(secs) * time.Second
 	}
+	// The target is this server's own system, and only that: a per-call
+	// gateway, system number, port or user would send the import to a system
+	// the switch was never enabled for.
+	for _, key := range importDestinationOverrides {
+		if _, set := args[key]; set {
+			return newToolResultError(fmt.Sprintf("import_transport does not take %q: the import always goes to this "+
+				"server's own system (set rfc_host/rfc_sysnr/rfc_port/rfc_user in its .vsp.json entry instead)", key)), nil
+		}
+	}
 	// The import gets a connection of its own: the shared one gives up after
 	// the library's 30 s, and a production import runs far longer than that.
 	dest, err := s.rfcDestination(args)
@@ -68,6 +77,10 @@ func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallTool
 	}
 	return newToolResultJSON(res), nil
 }
+
+// importDestinationOverrides are the rfcDestination parameters that would
+// point a call at another system; the import refuses them.
+var importDestinationOverrides = []string{"host", "sysnr", "port", "user"}
 
 // startImport runs an import in the background and returns at once, with the
 // task to follow it by. The import outlives the tool call; it is bounded by

@@ -76,3 +76,26 @@ func TestHandleImportTransport_FailsClosedUnderTheSafetySwitches(t *testing.T) {
 		})
 	}
 }
+
+// A per-call gateway, system number, port or user would send the import to
+// another system than the one the switch was enabled for; each is refused
+// before any connection.
+func TestHandleImportTransport_RefusesDestinationOverrides(t *testing.T) {
+	server := NewServer(&Config{
+		BaseURL: "https://unreachable.invalid:44300", Username: "u", Password: "p", Client: "100",
+		AllowTransportImport: true,
+	})
+	for key, val := range map[string]any{"host": "other.invalid", "sysnr": "01", "port": float64(3301), "user": "SOMEONE"} {
+		t.Run(key, func(t *testing.T) {
+			res, err := server.handleImportTransport(context.Background(),
+				newRequest(map[string]any{"transport": "TR-EXAMPLE", key: val}))
+			if err != nil {
+				t.Fatalf("handleImportTransport: %v", err)
+			}
+			text := resultText(res)
+			if !res.IsError || !strings.Contains(text, "does not take") || !strings.Contains(text, key) {
+				t.Errorf("want a refusal of %q, got %s", key, text)
+			}
+		})
+	}
+}
