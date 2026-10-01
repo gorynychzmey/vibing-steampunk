@@ -27,12 +27,30 @@ type LockResult struct {
 // LockObject acquires an edit lock on an ABAP object.
 // objectURL is the ADT URL of the object (e.g., "/sap/bc/adt/programs/programs/ZTEST")
 // accessMode is typically "MODIFY" for editing
-func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode string) (*LockResult, error) {
+//
+// corrNr is the transport request (or task) the edit goes under. ADT accepts
+// it on the LOCK request itself, as the ADT API documents, and on-premise
+// systems that bind the lock to a request expect it there rather than only on
+// the write that follows. Without it the request is sent exactly as before.
+//
+// It is variadic so that a call site without a transport stays valid as
+// written; only the first value is read.
+func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode string, corrNr ...string) (*LockResult, error) {
+	transport := ""
+	if len(corrNr) > 0 {
+		transport = corrNr[0]
+	}
 	// Safety check - only check for MODIFY locks, READ locks are safe
 	if accessMode == "" || accessMode == "MODIFY" {
 		if err := c.checkSafety(OpLock, "LockObject"); err != nil {
 			return nil, err
 		}
+	}
+
+	// The transport goes out on the LOCK, so the transport policy is checked
+	// here, before SAP sees it, and not only in the write that follows.
+	if err := c.checkTransportableEdit(transport, "LockObject"); err != nil {
+		return nil, err
 	}
 
 	if accessMode == "" {
@@ -42,6 +60,17 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 	params := url.Values{}
 	params.Set("_action", "LOCK")
 	params.Set("accessMode", accessMode)
+	if transport != "" {
+		params.Set("corrNr", transport)
+	}
+
+	// The window opens when the handle is recorded, after the response is in.
+	// Until then, count the LOCK as a stateful request under way, so no
+	// stateless request ends the context between the two (see Transport.do).
+	if c.transport != nil {
+		c.transport.contextInFlight.Add(1)
+		defer c.transport.contextInFlight.Add(-1)
+	}
 
 	resp, err := c.transport.Request(ctx, objectURL, &RequestOptions{
 		Method:   http.MethodPost,
@@ -164,6 +193,15 @@ func (c *Client) UnlockObject(ctx context.Context, objectURL string, lockHandle 
 		Stateful: true, // Must match lock session (issue #88)
 	})
 	if err != nil {
+		// Under cookie-file recovery, an expired session answering the
+		// unlock means the session holding the lock is gone, and the enqueue
+		// with it. Keeping the handle would refuse every later recovery until
+		// the entry ages out.
+		var apiErr *APIError
+		if c.config != nil && c.config.ReauthReadOnly && errors.As(err, &apiErr) &&
+			(apiErr.IsSessionExpired() || apiErr.StatusCode == http.StatusUnauthorized) {
+			c.noteLockClosed(lockHandle)
+		}
 		return fmt.Errorf("unlocking object: %w", err)
 	}
 
@@ -241,6 +279,7 @@ const (
 	ObjectTypeFunctionMod   CreatableObjectType = "FUGR/FF"
 	ObjectTypeTable         CreatableObjectType = "TABL/DT"
 	ObjectTypePackage       CreatableObjectType = "DEVC/K"
+	ObjectTypeMessageClass  CreatableObjectType = "MSAG/N"
 	// RAP object types (read-only via ADT, created via RAP generators)
 	ObjectTypeDDLS CreatableObjectType = "DDLS/DF"  // CDS DDL Source
 	ObjectTypeBDEF CreatableObjectType = "BDEF/BDO" // Behavior Definition
@@ -294,6 +333,10 @@ type CreateObjectOptions struct {
 
 	// For BDEF: source code (required for creation - ADT API embeds source in creation request)
 	Source string `json:"source,omitempty"`
+
+	// For MSAG: the original language as an ISO code ("EN", "DE"); the
+	// session language when empty.
+	MasterLanguage string `json:"masterLanguage,omitempty"`
 }
 
 // objectTypeInfo contains metadata for creating object types.
@@ -338,6 +381,12 @@ var objectTypes = map[CreatableObjectType]objectTypeInfo{
 		creationPath: "/sap/bc/adt/functions/groups/%s/fmodules",
 		rootName:     "fmodule:abapFunctionModule",
 		namespace:    `xmlns:fmodule="http://www.sap.com/adt/functions/fmodules"`,
+	},
+	ObjectTypeMessageClass: {
+		creationPath: "/sap/bc/adt/messageclass",
+		rootName:     "mc:messageClass",
+		namespace:    `xmlns:mc="http://www.sap.com/adt/MessageClass"`,
+		bodyBuilder:  messageClassCreateBody,
 	},
 	ObjectTypePackage: {
 		creationPath: "/sap/bc/adt/packages",
@@ -526,6 +575,22 @@ func (c *Client) cleanupPartialObject(ctx context.Context, objectURL, pkg, trans
 		Transport: transport,
 	}
 
+	// Step 0: run DeleteObject's gate here, before any lock. Inside the lock
+	// window its package lookup is a stateless request that retires the
+	// session the handle belongs to, and the DELETE comes back 423
+	// (issue #238). Gating first also means an object outside the allowlist
+	// is refused before it is ever locked, rather than locked and then refused.
+	ctx, gateErr := c.PrepareDelete(ctx, objectURL, transport)
+	if gateErr != nil {
+		pce.CleanupActions = append(pce.CleanupActions,
+			fmt.Sprintf("delete refused by the mutation gate: %v", gateErr))
+		pce.ManualSteps = []string{
+			"check that the object's package is covered by --allowed-packages",
+			"otherwise delete the object manually via SE80",
+		}
+		return pce
+	}
+
 	// Step 1: orphan lock cleanup (cheap; reuses the existing helper).
 	c.tryCleanupOrphanLock(ctx, objectURL)
 	pce.CleanupActions = append(pce.CleanupActions, "tried orphan-lock cleanup")
@@ -534,7 +599,7 @@ func (c *Client) cleanupPartialObject(ctx context.Context, objectURL, pkg, trans
 	// half-created object. If we cannot acquire a lock the cleanup
 	// stops here and we surface manual recovery steps; we never try
 	// to delete without a lock because that would 403 anyway.
-	lock, lockErr := c.LockObject(ctx, objectURL, "MODIFY")
+	lock, lockErr := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if lockErr != nil {
 		pce.CleanupActions = append(pce.CleanupActions,
 			fmt.Sprintf("could not acquire lock for delete: %v", lockErr))
@@ -722,10 +787,7 @@ func (c *Client) CreateObject(ctx context.Context, opts CreateObjectOptions) err
 	}
 
 	// Build creation URL
-	creationURL := typeInfo.creationPath
-	if opts.ObjectType == ObjectTypeFunctionMod && opts.ParentName != "" {
-		creationURL = fmt.Sprintf(typeInfo.creationPath, strings.ToUpper(opts.ParentName))
-	}
+	creationURL := creationURLFor(opts, typeInfo)
 
 	// Build request body with current user as default responsible
 	defaultResponsible := c.config.Username
@@ -743,6 +805,13 @@ func (c *Client) CreateObject(ctx context.Context, opts CreateObjectOptions) err
 	contentType := "application/*"
 	if opts.ObjectType == ObjectTypeBDEF {
 		contentType = "application/vnd.sap.adt.blues.v1+xml"
+	}
+	if opts.ObjectType == ObjectTypeMessageClass {
+		contentType = "application/vnd.sap.adt.mc.messageclass+xml"
+		if opts.MasterLanguage == "" {
+			opts.MasterLanguage = c.config.Language
+		}
+		body = buildCreateObjectBody(opts, typeInfo, defaultResponsible)
 	}
 
 	// First attempt
@@ -782,6 +851,17 @@ func (c *Client) CreateObject(ctx context.Context, opts CreateObjectOptions) err
 	}
 
 	return nil
+}
+
+// creationURLFor is the collection a new object is POSTed to. A function
+// module's is inside its group, and a namespaced group ("/NS/GROUP") has to be
+// escaped like every other object URL, or the POST goes to
+// .../groups//NS/GROUP/fmodules and comes back 404.
+func creationURLFor(opts CreateObjectOptions, typeInfo objectTypeInfo) string {
+	if opts.ObjectType == ObjectTypeFunctionMod && opts.ParentName != "" {
+		return fmt.Sprintf(typeInfo.creationPath, url.PathEscape(strings.ToLower(opts.ParentName)))
+	}
+	return typeInfo.creationPath
 }
 
 func buildCreateObjectBody(opts CreateObjectOptions, typeInfo objectTypeInfo, defaultResponsible string) string {
@@ -852,7 +932,7 @@ func buildCreateObjectBody(opts CreateObjectOptions, typeInfo objectTypeInfo, de
 			opts.ObjectType,
 			responsible,
 			strings.ToUpper(opts.ParentName),
-			strings.ToLower(opts.ParentName),
+			url.PathEscape(strings.ToLower(opts.ParentName)),
 			typeInfo.rootName)
 	}
 
@@ -1002,6 +1082,12 @@ func (c *Client) DeleteObject(ctx context.Context, objectURL string, lockHandle 
 	// how a lock-window counter ends up permanently non-zero.
 	c.noteLockClosed(lockHandle)
 
+	// The DELETE consumed the handle, but the ENQUEUE the LOCK took lives on
+	// with the stateful context. Behind a session-holding proxy that context
+	// outlives the chain, and SM12 keeps showing a lock on an object that no
+	// longer exists. Retire the context the way UnlockObject does.
+	c.transport.ReleaseProxyContext(ctx)
+
 	return nil
 }
 
@@ -1030,6 +1116,8 @@ func GetObjectURL(objectType CreatableObjectType, name string, parentName string
 		return fmt.Sprintf("/sap/bc/adt/functions/groups/%s/fmodules/%s", encodedParent, encodedName)
 	case ObjectTypePackage:
 		return fmt.Sprintf("/sap/bc/adt/packages/%s", encodedName)
+	case ObjectTypeMessageClass:
+		return fmt.Sprintf("/sap/bc/adt/messageclass/%s", url.PathEscape(strings.ToLower(name)))
 	// RAP object types - use lowercase for CDS objects
 	case ObjectTypeDDLS:
 		return fmt.Sprintf("/sap/bc/adt/ddic/ddl/sources/%s", url.PathEscape(strings.ToLower(name)))
@@ -1377,7 +1465,7 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 	// the lock (issue #91).
 	ctx = withMutationPackageChecked(ctx, tableURL)
 
-	lock, err := c.LockObject(ctx, tableURL, "MODIFY")
+	lock, err := c.LockObject(ctx, tableURL, "MODIFY", opts.Transport)
 	if err != nil {
 		return fmt.Errorf("locking table: %w", err)
 	}

@@ -17,6 +17,11 @@ func handleHelp(topic string) *mcp.CallToolResult {
 	case "read":
 		return mcp.NewToolResultText(`SAP(action="read") - Read source code and metadata
 
+IDoc, as WE02 shows it (classic RFC; segment data EDID4-SDATA cannot be queried):
+  SAP(action="read", target="IDOC 28757955")
+  SAP(action="read", target="IDOC 28757955", params={"segment": "E1EDKA1"})   (prefix; "all_fields": true, "raw": true, "max_segments": 500)
+  Control record, status records newest first with their texts, segments cut into fields by the segment definition.
+
 Read source with context (recommended):
   SAP(action="read", target="CLAS ZCL_TEST")
   SAP(action="read", target="PROG ZREPORT")
@@ -85,6 +90,7 @@ Create object:
   SAP(action="create", target="OBJECT", params={"object_type": "FUGR/F", "name": "ZVSP_DEMO", "description": "Demo group", "package_name": "$TMP"})
   SAP(action="create", target="OBJECT", params={"object_type": "FUGR/FF", "name": "ZVSP_DEMO_FM", "parent_name": "ZVSP_DEMO", "description": "RFC demo", "package_name": "$TMP", "rfc_enabled": true, "source": "FUNCTION zvsp_demo_fm\n  IMPORTING VALUE(iv_n) TYPE i\n  EXPORTING VALUE(ev_result) TYPE i.\n  ev_result = iv_n * 2.\nENDFUNCTION."})
   SAP(action="create", target="DEVC", params={"name": "$ZNEW", "description": "New package"})
+  SAP(action="create", target="OBJECT", params={"object_type": "MSAG/N", "name": "ZDEMO", "description": "Demo messages", "package_name": "$TMP", "language": "DE", "messages": {"001": "Auftrag & nicht gefunden"}})
   SAP(action="create", target="TABL", params={"name": "ZTABLE", "description": "New table", "fields": "[...]", "package": "$TMP"})
   SAP(action="create", target="CLONE", params={"object_type": "CLAS", "source_name": "ZCL_OLD", "target_name": "ZCL_NEW", "package": "$TMP"})
   SAP(action="create", target="STRUCT", params={"description": "Demo", "package": "$TMP",
@@ -126,8 +132,16 @@ High-level create (with source):
 Table contents:
   SAP(action="query", target="TABL_CONTENTS ZTABLE", params={"max_rows": 50})
 
-Free SQL:
-  SAP(action="query", target="SQL", params={"sql_query": "SELECT * FROM T000 WHERE MANDT = '001'", "max_rows": 100})`)
+Free SQL (ABAP SQL, read in the logon client):
+  SAP(action="query", target="SQL", params={"sql_query": "SELECT * FROM T000 WHERE MANDT = '001'", "max_rows": 100})
+  SAP(action="query", params={"sql": "SELECT h~trkorr, t~as4text FROM e070 AS h INNER JOIN e07t AS t ON t~trkorr = h~trkorr ORDER BY h~trkorr DESCENDING"})
+
+The data preview wraps the statement in its own SELECT ... INTO, so it takes
+ABAP SQL only. vsp rewrites the common ANSI spellings before sending -- t.col to
+t~col, DESC/ASC to DESCENDING/ASCENDING, a closing period -- and says so in
+"Notes". A refused query comes back with SAP's message and a hint: the columns
+the table does have, what a name it cannot find is, or that the client field
+of a client-specific table cannot be in the WHERE condition.`)
 
 	case "test":
 		return mcp.NewToolResultText(`SAP(action="test") - Run tests
@@ -198,7 +212,8 @@ A report's or a class's text pool — selection texts (S), text symbols (I), hea
 What differs between two languages — named separately, not as a list:
   SAP(action="i18n", params={"op": "compare_languages", "object_url": "/sap/bc/adt/oo/classes/zcl_demo", "source_language": "EN", "target_language": "DE"})
 
-Writing needs a lock_handle from a lock taken first, and changes the system:
+Writing changes the system; without lock_handle the call locks and unlocks itself.
+write_message_texts adds new message numbers and leaves the others as they are:
   SAP(action="i18n", params={"op": "write_message_texts", "name": "ZVSP_GIT", "language": "DE", "lock_handle": "...", "texts": []})
   SAP(action="i18n", params={"op": "texts_set", "program_name": "ZDEMO_RUN", "texts": {"P_DEVC": "Package to scan"}})
   SAP(action="i18n", params={"op": "texts_set", "program_name": "ZDEMO_RUN", "texts": {"selections": {"S_OBJ": "Object names"}, "symbols": {"001": "Nothing found"}}, "dry_run": true})
@@ -484,6 +499,10 @@ Transports:
   SAP(action="system", params={"type": "delete_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "merge_transports", "source": ["A4HK900001", "A4HK900003"], "target": "A4HK900005"})
   SAP(action="system", params={"type": "move_transport_object", "object": "PROG ZDEMO", "from": "A4HK900001", "to": "A4HK900005"})
+  SAP(action="system", params={"type": "add_transport_object", "transport": "A4HK900001", "objects": ["LIMU REPT ZDEMO", "R3TR PROG ZDEMO2"]})
+  SAP(action="system", params={"type": "add_transport_object", "transport": "A4HK900001", "object": "R3TR TABU ZDEMO_CONF", "keys": ["100KEY1", "100KEY2*"]})
+  SAP(action="system", params={"type": "remove_transport_object", "transport": "A4HK900001", "object": "PROG ZDEMO"})
+    (add goes to your task in the request; table keys are TABKEY: key fields end to end at full length, '*' generic)
       SE09's Merge Requests and a single entry's move, through ZADT_VSP's function bridge (needs ZADT_VSP)
   SAP(action="system", params={"type": "get_user_transports", "user_name": "DEVELOPER"})
       same parameters as list_transports (request_type, request_status, released_from/to, targets, source, config_uri)
@@ -635,7 +654,7 @@ func getUnhandledErrorMessage(action, objectType, objectName string) string {
 
 	switch action {
 	case "read":
-		sb.WriteString("Supported read targets: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, TABL, TABL_CONTENTS, DEVC, MSAG, TRAN, TYPE_INFO, STRUCT, CDS_DEPS\n")
+		sb.WriteString("Supported read targets: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, TABL, TABL_CONTENTS, DEVC, MSAG, TRAN, TYPE_INFO, STRUCT, CDS_DEPS, IDOC\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"read\") for examples.")
 	case "edit":
 		sb.WriteString("Supported edit targets: CLAS, PROG, INTF, FUNC, DDLS, BDEF, SRVD, TABL, LOCK, UNLOCK, UPDATE_SOURCE, ACTIVATE, ACTIVATE_PACKAGE, EDITSOURCE, PUBLISH_SERVICE, UNPUBLISH_SERVICE\n")
