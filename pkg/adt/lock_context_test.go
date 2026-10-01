@@ -153,7 +153,9 @@ func TestLockContext_ConcurrentChainsAndReadersAllLand(t *testing.T) {
 	}()
 
 	var chains sync.WaitGroup
-	errs := make(chan error, 40)
+	// Room for every error the producers can send -- 20 rounds, two chains,
+	// update and unlock each -- so a regression fails the test, not hangs it.
+	errs := make(chan error, 80)
 	for _, name := range []string{"ZDEMO_A", "ZDEMO_B"} {
 		chains.Add(1)
 		go func(objectURL string) {
@@ -179,5 +181,44 @@ func TestLockContext_ConcurrentChainsAndReadersAllLand(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+// A lock older than the keep-alive's thirty minutes still isolates stateless
+// requests: its context may well be alive.
+func TestLockWindow_PresenceOutlivesTheKeepAliveLimit(t *testing.T) {
+	w := &lockWindow{open: map[string]time.Time{"H": time.Now().Add(-45 * time.Minute)}}
+	if w.outstanding() {
+		t.Error("keep-alive still suppressed after 45 minutes")
+	}
+	if !w.present() {
+		t.Error("the transport forgot a lock after 45 minutes")
+	}
+	w.open["OLD"] = time.Now().Add(-13 * time.Hour)
+	w.present()
+	if _, ok := w.open["OLD"]; ok {
+		t.Error("a record past lockRecordMaxAge was kept")
+	}
+}
+
+// A context id the configuration put on the request goes; the empty one the
+// proxy guard sends, and every other cookie, stay.
+func TestStripContextID(t *testing.T) {
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://sap.example.com/x", nil)
+	req.AddCookie(&http.Cookie{Name: "SAP_SESSIONID_X", Value: "s"})
+	req.AddCookie(&http.Cookie{Name: "sap-contextid", Value: "SID:ANON:abc"})
+	stripContextID(req)
+	if c, err := req.Cookie("sap-contextid"); err == nil {
+		t.Errorf("sap-contextid kept: %v", c)
+	}
+	if _, err := req.Cookie("SAP_SESSIONID_X"); err != nil {
+		t.Error("the session cookie was dropped")
+	}
+
+	req, _ = http.NewRequestWithContext(context.Background(), http.MethodGet, "https://sap.example.com/x", nil)
+	req.AddCookie(&http.Cookie{Name: "sap-contextid", Value: ""})
+	stripContextID(req)
+	if _, err := req.Cookie("sap-contextid"); err != nil {
+		t.Error("the guard's empty sap-contextid was removed")
 	}
 }

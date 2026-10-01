@@ -802,7 +802,10 @@ func (t *Transport) ReleaseProxyContext(ctx context.Context) {
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("X-sap-adt-sessiontype", "stateless")
 	traceHTTPRequest(req, nil)
-	resp, err := t.httpClient.Do(req)
+	// Through do, like every other request: while another chain holds a lock
+	// or a stateful request is under way, the release goes without the
+	// context id and leaves that chain's context alone.
+	resp, err := t.do(req)
 	if err != nil {
 		return
 	}
@@ -1057,6 +1060,27 @@ func (t *Transport) addCookies(req *http.Request) {
 	}
 }
 
+// stripContextID removes a non-empty sap-contextid cookie from req.
+func stripContextID(req *http.Request) {
+	cookies := req.Cookies()
+	kept := cookies[:0]
+	stripped := false
+	for _, c := range cookies {
+		if c.Name == "sap-contextid" && c.Value != "" {
+			stripped = true
+			continue
+		}
+		kept = append(kept, c)
+	}
+	if !stripped {
+		return
+	}
+	req.Header.Del("Cookie")
+	for _, c := range kept {
+		req.AddCookie(c)
+	}
+}
+
 // do sends a request, keeping concurrent callers of one client from breaking
 // each other's lock chains. Two things end or break the stateful ADT context a
 // lock handle is bound to, and both are the ordinary work of another caller --
@@ -1084,11 +1108,16 @@ func (t *Transport) addCookies(req *http.Request) {
 func (t *Transport) do(req *http.Request) (*http.Response, error) {
 	if req.Header.Get("X-sap-adt-sessiontype") == "stateless" {
 		t.contextMu.RLock()
-		if t.contextInFlight.Load() == 0 && (t.locks == nil || !t.locks.outstanding()) {
+		if t.contextInFlight.Load() == 0 && (t.locks == nil || !t.locks.present()) {
 			defer t.contextMu.RUnlock()
 			return t.httpClient.Do(req)
 		}
 		t.contextMu.RUnlock()
+		// Cookies supplied with the configuration (browser or SAML logon)
+		// were put on the request already, sap-contextid among them; it
+		// would end the context just the same. The empty one the proxy guard
+		// sends to switch the context off stays.
+		stripContextID(req)
 		client, ok := t.httpClient.(*http.Client)
 		if !ok || client.Jar == nil {
 			return t.httpClient.Do(req)
