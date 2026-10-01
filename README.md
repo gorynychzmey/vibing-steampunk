@@ -460,6 +460,15 @@ SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport toc TR-A --target /GROUP/ --rele
 MCP: `system` with `copy_to_toc` (`transport`, `target`, optional
 `description`, `cts_project`, `release`).
 
+Under `--allowed-packages`, every object the copy would carry is checked
+first (a LIMU entry by its class, interface or program; one whose object
+cannot be told, such as `LIMU FUNC`, is refused), and any offender refuses the
+whole copy before anything is created. Entries a modifiable request holds
+itself, outside its tasks, are not copied; they are listed under `skipped`.
+If a list fails to copy or the release fails, the result is an error that
+names the transport of copies, what was copied, what was not, and the
+release status. `--read-only` refuses it like any transport write.
+
 `vsp update` fetches the latest release for this platform, compares it with
 the running version, verifies the download against the release's
 `checksums.txt`, and puts it in place of the running binary — the old one is
