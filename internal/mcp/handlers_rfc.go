@@ -75,6 +75,19 @@ func (s *Server) routeRFCAction(ctx context.Context, action, objectType, objectN
 		}
 	}
 
+	// Executing a function module does whatever the module does — post a
+	// document, change a user, start a job — so "call" is gated like
+	// ExecuteABAP, as a workflow operation, which --read-only refuses. It is
+	// checked before logon, so a refused call sends nothing to the gateway.
+	// Apart from run, gated above, the other ops only read: system info, ping,
+	// the interface metadata, TFDIR/TADIR/CVERS and RFC_READ_TABLE rows, and
+	// RFC_SIMULATE_AUTH_CHECK.
+	if op == "call" {
+		if err := s.adtClient.Safety().CheckOperation(adt.OpWorkflow, "RFCCall"); err != nil {
+			return nil, true, err
+		}
+	}
+
 	c, release, err := s.rfcClientFor(ctx, params)
 	if err != nil {
 		return nil, true, err
