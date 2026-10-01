@@ -56,7 +56,7 @@ func TestNormalizeOpenSQL(t *testing.T) {
 func TestWrapSQL_BreaksAnINListWithoutBlanks(t *testing.T) {
 	var lits []string
 	for i := 0; i < 50; i++ {
-		lits = append(lits, "'D11K914546'")
+		lits = append(lits, "'TR-EXAMPLE'")
 	}
 	q := "SELECT trkorr FROM e070 WHERE trkorr IN (" + strings.Join(lits, ",") + ")"
 	w := wrapSQL(q)
@@ -116,5 +116,20 @@ func TestExplainQueryError_ClientFieldAndPassThrough(t *testing.T) {
 	other := errors.New("connection refused")
 	if got := c.explainQueryError(context.Background(), "SELECT 1", nil, other); got != other {
 		t.Errorf("a non-SAP error was changed: %v", got)
+	}
+}
+
+// DESC/ASC is rewritten only as a direction after a sort expression; right
+// after BY or a comma it is the expression -- a column named DESC.
+func TestNormalizeOpenSQL_AColumnNamedDesc(t *testing.T) {
+	for in, want := range map[string]string{
+		"SELECT desc FROM ztab ORDER BY desc":       "SELECT desc FROM ztab ORDER BY desc",
+		"SELECT a, desc FROM ztab ORDER BY a, desc": "SELECT a, desc FROM ztab ORDER BY a, desc",
+		"SELECT desc FROM ztab ORDER BY desc DESC":  "SELECT desc FROM ztab ORDER BY desc DESCENDING",
+		"SELECT a FROM ztab ORDER BY a DESC, b ASC": "SELECT a FROM ztab ORDER BY a DESCENDING, b ASCENDING",
+	} {
+		if got, _ := normalizeOpenSQL(in); got != want {
+			t.Errorf("normalizeOpenSQL(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

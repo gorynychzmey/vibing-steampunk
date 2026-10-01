@@ -113,6 +113,12 @@ func normalizeOpenSQL(q string) (string, []string) {
 		changed := false
 		for _, m := range reDirection.FindAllStringIndex(masked[loc[1]:], -1) {
 			from, to := loc[1]+m[0], loc[1]+m[1]
+			// A direction follows a sort expression. Right after BY or a
+			// comma the word is the expression itself -- a column or alias
+			// that happens to be named DESC.
+			if prev := strings.TrimRight(masked[loc[1]:from], " \t\r\n"); prev == "" || strings.HasSuffix(prev, ",") {
+				continue
+			}
 			word := strings.ToUpper(masked[from:to])
 			edits = append(edits, sqlEdit{from, to, map[string]string{"DESC": "DESCENDING", "ASC": "ASCENDING"}[word]})
 			changed = true
@@ -299,10 +305,15 @@ func editDistance(a, b string) int {
 
 // missingSourceHint says what a name the data preview cannot find is: a
 // structure, an append, a view of a kind it does not read, or nothing at all.
+// The hint claims a name is missing only when both dictionary reads worked: a
+// timeout or a missing authorization says nothing about the dictionary.
 func (c *Client) missingSourceHint(ctx context.Context, name string) string {
 	lit := strings.ReplaceAll(name, "'", "''")
 	res, err := c.runQueryRaw(ctx, "SELECT tabname, tabclass FROM dd02l WHERE tabname = '"+lit+"' AND as4local = 'A'", 1)
-	if err == nil && res != nil && len(res.Rows) > 0 {
+	if err != nil {
+		return fmt.Sprintf("whether %s exists could not be checked (reading DD02L failed: %v)", name, err)
+	}
+	if res != nil && len(res.Rows) > 0 {
 		class := strings.TrimSpace(fmt.Sprint(res.Rows[0]["TABCLASS"]))
 		switch class {
 		case "INTTAB":
@@ -320,7 +331,10 @@ func (c *Client) missingSourceHint(ctx context.Context, name string) string {
 	}
 	like := strings.ReplaceAll(prefix, "'", "''")
 	res, err = c.runQueryRaw(ctx, "SELECT tabname FROM dd02l WHERE tabname LIKE '"+like+"%' AND as4local = 'A' AND ( tabclass = 'TRANSP' OR tabclass = 'CLUSTER' OR tabclass = 'POOL' OR tabclass = 'VIEW' )", 15)
-	if err == nil && res != nil && len(res.Rows) > 0 {
+	if err != nil {
+		return "no table or view " + name + " in the dictionary (looking for similar names failed: " + err.Error() + ")"
+	}
+	if res != nil && len(res.Rows) > 0 {
 		var ns []string
 		for _, r := range res.Rows {
 			ns = append(ns, strings.TrimSpace(fmt.Sprint(r["TABNAME"])))
