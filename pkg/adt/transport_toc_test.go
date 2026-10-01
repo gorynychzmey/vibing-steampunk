@@ -319,3 +319,85 @@ func TestCopyToTransportOfCopies_AFailedReleaseIsAnError(t *testing.T) {
 		}
 	}
 }
+
+// requestLevelXML is a modifiable request that holds entries itself, outside
+// its task: an object and a CORR attribute. own lists them as the request's
+// direct children, aggregate in all_objects -- ADT may send either or both.
+func requestLevelXML(task []string, own, aggregate bool) string {
+	var all, tk, req strings.Builder
+	for _, o := range task {
+		e := fmt.Sprintf(`<tm:abap_object tm:pgmid="R3TR" tm:type="PROG" tm:name="%s"/>`, o)
+		tk.WriteString(e)
+		all.WriteString(e)
+	}
+	for _, e := range []string{
+		`<tm:abap_object tm:pgmid="R3TR" tm:type="TABU" tm:name="ZREQ_CONF"/>`,
+		`<tm:abap_object tm:pgmid="CORR" tm:type="RELE" tm:name="TR-SRC"/>`,
+	} {
+		if aggregate {
+			all.WriteString(e)
+		}
+		if own {
+			req.WriteString(e)
+		}
+	}
+	tasks := ""
+	if len(task) > 0 {
+		tasks = `<tm:task tm:number="TR-TASK1" tm:parent="TR-SRC" tm:owner="TESTUSER" tm:status="D">` + tk.String() + `</tm:task>`
+	}
+	return `<?xml version="1.0" encoding="utf-8"?><tm:root xmlns:tm="http://www.sap.com/cts/adt/tm">` +
+		`<tm:request tm:number="TR-SRC" tm:owner="TESTUSER" tm:desc="demo" tm:type="K" tm:status="D">` +
+		req.String() + `<tm:all_objects>` + all.String() + `</tm:all_objects>` + tasks + `</tm:request></tm:root>`
+}
+
+// A modifiable request's own entries are not copied -- its tasks' lists are
+// -- and each is reported as skipped with the reason, never dropped silently.
+func TestCopyToTransportOfCopies_RequestLevelEntriesAreSkippedWithANote(t *testing.T) {
+	for _, c := range []struct{ own, aggregate bool }{{true, true}, {false, true}, {true, false}} {
+		t.Run(fmt.Sprintf("apart=%v aggregated=%v", c.own, c.aggregate), func(t *testing.T) {
+			client, _ := newTocClient(t, requestLevelXML([]string{"ZDEMO_A"}, c.own, c.aggregate))
+			bridge := &fakeBridge{}
+			res, err := client.copyToTransportOfCopies(context.Background(), bridge, "TR-SRC", TransportOfCopiesOptions{Target: "QAS"})
+			if err != nil {
+				t.Fatalf("copyToTransportOfCopies: %v", err)
+			}
+			if got := copiedFrom(bridge); len(got) != 1 || got[0] != "TR-TASK1" {
+				t.Errorf("copied from %v, want only [TR-TASK1]", got)
+			}
+			skipped := map[string]string{}
+			for _, s := range res.Skipped {
+				skipped[s.Entry] = s.Reason
+			}
+			if len(skipped) != 2 {
+				t.Fatalf("skipped = %+v, want the request's two own entries", res.Skipped)
+			}
+			if r := skipped["R3TR TABU ZREQ_CONF"]; !strings.Contains(r, "in no task") {
+				t.Errorf("object entry skipped as %q, want the in-no-task note", r)
+			}
+			if r := skipped["CORR RELE TR-SRC"]; !strings.Contains(r, "request attribute") {
+				t.Errorf("CORR entry skipped as %q, want the request-attribute note", r)
+			}
+			if _, ok := skipped["R3TR PROG ZDEMO_A"]; ok {
+				t.Error("a task's entry was reported as skipped")
+			}
+		})
+	}
+}
+
+// A modifiable request whose only entries are its own creates nothing and
+// says which entries it did not copy, instead of "holds no objects".
+func TestCopyToTransportOfCopies_OnlyRequestLevelEntriesRefusesNamingThem(t *testing.T) {
+	client, ts := newTocClient(t, requestLevelXML(nil, true, true))
+	_, err := client.copyToTransportOfCopies(context.Background(), &fakeBridge{}, "TR-SRC", TransportOfCopiesOptions{Target: "QAS"})
+	if err == nil {
+		t.Fatal("created a transport of copies with none of the request's entries")
+	}
+	for _, want := range []string{"R3TR TABU ZREQ_CONF", "CORR RELE TR-SRC"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+	if len(ts.created) != 0 {
+		t.Error("created a request before refusing")
+	}
+}

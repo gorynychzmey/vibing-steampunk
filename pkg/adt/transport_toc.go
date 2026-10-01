@@ -46,6 +46,9 @@ type TransportOfCopiesResult struct {
 	CopiedFrom []string `json:"copiedFrom,omitempty"`
 	// CopiedEntries are the entries of the lists in CopiedFrom.
 	CopiedEntries []string `json:"copiedEntries,omitempty"`
+	// Skipped are the source's entries left out of the copy on purpose, with
+	// the reason: a modifiable request's own entries, outside its tasks.
+	Skipped []TransportOfCopiesSkip `json:"skipped,omitempty"`
 	// Failed are the lists TR_COPY_COMM did not copy, with the entries they
 	// hold and why.
 	Failed []TransportOfCopiesFailure `json:"failed,omitempty"`
@@ -65,6 +68,20 @@ type TransportOfCopiesFailure struct {
 	Error   string   `json:"error"`
 }
 
+// TransportOfCopiesSkip is one entry of the source not copied on purpose.
+type TransportOfCopiesSkip struct {
+	Entry  string `json:"entry"`
+	Reason string `json:"reason"`
+}
+
+func describeSkips(skips []TransportOfCopiesSkip) string {
+	parts := make([]string, 0, len(skips))
+	for _, s := range skips {
+		parts = append(parts, s.Entry+" ("+s.Reason+")")
+	}
+	return strings.Join(parts, "; ")
+}
+
 // incomplete is the error for a transport of copies that exists but is not
 // what was asked for: what it holds, what is missing, and its release.
 func (r *TransportOfCopiesResult) incomplete(what string) error {
@@ -77,6 +94,9 @@ func (r *TransportOfCopiesResult) incomplete(what string) error {
 	}
 	for _, f := range r.Failed {
 		fmt.Fprintf(&b, "; not copied from %s (%s): %s", f.From, strings.Join(f.Entries, ", "), f.Error)
+	}
+	if len(r.Skipped) > 0 {
+		fmt.Fprintf(&b, "; skipped: %s", describeSkips(r.Skipped))
 	}
 	fmt.Fprintf(&b, "; release: %s", r.ReleaseStatus)
 	return errors.New(b.String())
@@ -109,8 +129,12 @@ func (c *Client) copyToTransportOfCopies(ctx context.Context, bridge functionBri
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", source, err)
 	}
-	from := copySources(details)
+	from, skipped := copySources(details)
 	if len(from) == 0 {
+		if len(skipped) > 0 {
+			return nil, fmt.Errorf("%s holds no objects in its tasks to copy; its request-level entries are not copied: %s",
+				source, describeSkips(skipped))
+		}
 		return nil, fmt.Errorf("%s holds no objects to copy", source)
 	}
 
@@ -133,7 +157,7 @@ func (c *Client) copyToTransportOfCopies(ctx context.Context, bridge functionBri
 	}
 
 	res := &TransportOfCopiesResult{Source: source, Transport: number, Target: target, Description: description,
-		ReleaseStatus: "not requested"}
+		ReleaseStatus: "not requested", Skipped: skipped}
 	// Every list is tried, so the result says of each whether it was copied;
 	// one that fails does not hide the state of the others.
 	for _, src := range from {
@@ -200,25 +224,64 @@ type copySource struct {
 	Entries []TransportObjectV2
 }
 
-// copySources names what TR_COPY_COMM has to copy from. It copies only the
-// entries of the request it is given, not those of its tasks: a modifiable
-// request keeps its objects in its tasks, so each task that holds some is
-// copied, as SE01's include-objects does. Release moves the tasks' entries
-// into the request, so a released one is copied from the request alone.
-func copySources(d *TransportDetails) []copySource {
+// copySources names what TR_COPY_COMM has to copy from, and the entries it
+// leaves out on purpose. TR_COPY_COMM copies only the entries of the request
+// or task it is given, and copies them all, so the rule is per list:
+//
+//   - A released request is copied from the request alone: release moved its
+//     tasks' entries into it, and copying the tasks too would double them.
+//   - A modifiable request is copied task by task, each task that holds
+//     entries, as SE01's include-objects does. Entries the request holds
+//     itself, outside any task, are not copied: copying the request's own
+//     list would also carry its CORR attribute entries (RELE comments, merge
+//     markers), which belong to that request and are no object to test in
+//     the target. Each one is reported as skipped, object entries (R3TR,
+//     LIMU) with how to bring them along.
+func copySources(d *TransportDetails) ([]copySource, []TransportOfCopiesSkip) {
 	if d.Status != "D" && d.Status != "L" {
 		if len(d.Objects) > 0 {
-			return []copySource{{Number: d.Number, Entries: d.Objects}}
+			return []copySource{{Number: d.Number, Entries: d.Objects}}, nil
 		}
-		return nil
+		return nil, nil
 	}
 	var out []copySource
+	inTask := map[string]bool{}
 	for _, t := range d.Tasks {
+		for _, o := range t.Objects {
+			inTask[entryKey(o)] = true
+		}
 		if len(t.Objects) > 0 {
 			out = append(out, copySource{Number: t.Number, Entries: t.Objects})
 		}
 	}
-	return out
+	// The request's own entries: those it lists apart, and those of the
+	// aggregate no task holds -- the answer may carry either.
+	var skipped []TransportOfCopiesSkip
+	seen := map[string]bool{}
+	for _, o := range append(append([]TransportObjectV2{}, d.RequestObjects...), d.Objects...) {
+		k := entryKey(o)
+		if inTask[k] || seen[k] {
+			continue
+		}
+		seen[k] = true
+		reason := "request attribute, not an object: not copied"
+		if isObjectEntry(o) {
+			reason = "held by the request itself, in no task: not copied; move it into a task, or copy the request once it is released"
+		}
+		skipped = append(skipped, TransportOfCopiesSkip{Entry: entryName(o), Reason: reason})
+	}
+	return out, skipped
+}
+
+// isObjectEntry is an entry that names a repository object (R3TR) or a part
+// of one (LIMU), as opposed to a request attribute such as CORR.
+func isObjectEntry(o TransportObjectV2) bool {
+	p := strings.ToUpper(strings.TrimSpace(o.PgmID))
+	return p == "R3TR" || p == "LIMU"
+}
+
+func entryKey(o TransportObjectV2) string {
+	return strings.ToUpper(o.PgmID) + "\x00" + strings.ToUpper(o.Type) + "\x00" + strings.ToUpper(o.Name)
 }
 
 // entryName is an entry as E071 keys it: "R3TR PROG ZDEMO".

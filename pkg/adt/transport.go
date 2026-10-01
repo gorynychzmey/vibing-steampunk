@@ -366,6 +366,9 @@ type TransportDetails struct {
 	TransportSummary
 	Tasks   []TransportTaskV2   `json:"tasks,omitempty"`
 	Objects []TransportObjectV2 `json:"objects,omitempty"`
+	// RequestObjects are the entries the request holds itself, outside its
+	// tasks, when the answer lists them apart (Objects aggregates them).
+	RequestObjects []TransportObjectV2 `json:"requestObjects,omitempty"`
 }
 
 // TransportTaskV2 represents a task within a transport request (extended version)
@@ -721,6 +724,14 @@ func parseTransportDetail(data []byte) (*TransportDetails, error) {
 			Info:     obj.ObjInfo,
 			Position: pos,
 		})
+	}
+
+	if len(req.AllObjects.Objects) > 0 {
+		for _, obj := range req.Objects {
+			t.RequestObjects = append(t.RequestObjects, TransportObjectV2{
+				PgmID: obj.PgmID, Type: obj.Type, Name: obj.Name, WBType: obj.WBType, Info: obj.ObjInfo,
+			})
+		}
 	}
 
 	// Convert tasks

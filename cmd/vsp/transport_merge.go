@@ -101,6 +101,9 @@ not QAS.100). Nothing is released unless --release is given.
 				fmt.Fprint(os.Stderr, ", released")
 			}
 			fmt.Fprintln(os.Stderr)
+			for _, sk := range res.Skipped {
+				fmt.Fprintf(os.Stderr, "  skipped %s: %s\n", sk.Entry, sk.Reason)
+			}
 		}
 		return terr
 	},
