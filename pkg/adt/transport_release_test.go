@@ -126,3 +126,18 @@ func TestReleaseTransportV2_NoReportKeepsTheOldBehaviour(t *testing.T) {
 		t.Fatalf("an empty answer became an error: %v", err)
 	}
 }
+
+// A cut-off answer is not "no reports": that reading would call the request
+// released. An empty answer keeps the old meaning.
+func TestReleaseTransportV2_AnUnreadableAnswerIsNotSuccess(t *testing.T) {
+	client, _ := newReleaseClient(t, map[string]string{"newreleasejobs": testReleaseLockedXML[:200]})
+	err := client.ReleaseTransportV2(context.Background(), "TR-EXAMPLE", ReleaseTransportOptions{})
+	if err == nil || !strings.Contains(err.Error(), "cannot be read") {
+		t.Fatalf("a truncated answer: err = %v", err)
+	}
+
+	client, _ = newReleaseClient(t, map[string]string{"newreleasejobs": ""})
+	if err := client.ReleaseTransportV2(context.Background(), "TR-EXAMPLE", ReleaseTransportOptions{}); err != nil {
+		t.Errorf("an empty answer: %v", err)
+	}
+}

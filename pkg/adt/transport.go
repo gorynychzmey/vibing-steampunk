@@ -1,6 +1,7 @@
 package adt
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -312,9 +313,13 @@ type releaseReport struct {
 	} `xml:"checkMessageList>checkMessage"`
 }
 
-// parseReleaseReports reads the check reports of a release answer; nil when
-// there are none or the answer is not one.
-func parseReleaseReports(data []byte) []releaseReport {
+// parseReleaseReports reads the check reports of a release answer. An empty
+// answer has none; one that is there but cannot be read is an error, not
+// "no reports" -- that would read as a release that went through.
+func parseReleaseReports(data []byte) ([]releaseReport, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, nil
+	}
 	xmlStr := string(data)
 	xmlStr = strings.ReplaceAll(xmlStr, "tm:", "")
 	xmlStr = strings.ReplaceAll(xmlStr, "chkrun:", "")
@@ -324,14 +329,18 @@ func parseReleaseReports(data []byte) []releaseReport {
 	}
 	var resp root
 	if err := xml.Unmarshal([]byte(xmlStr), &resp); err != nil {
-		return nil
+		return nil, fmt.Errorf("the release answer cannot be read (%v), so whether the request was released is unknown; check it in the transport organizer", err)
 	}
-	return resp.Reports
+	return resp.Reports, nil
 }
 
 func parseReleaseResult(data []byte) ([]string, error) {
+	reports, err := parseReleaseReports(data)
+	if err != nil {
+		return nil, err
+	}
 	var messages []string
-	for _, r := range parseReleaseReports(data) {
+	for _, r := range reports {
 		messages = append(messages, fmt.Sprintf("[%s] Status: %s", r.Reporter, r.Status))
 		for _, m := range r.Messages {
 			messages = append(messages, fmt.Sprintf("  [%s] %s", m.Type, m.Text))
@@ -883,7 +892,11 @@ func (c *Client) ReleaseTransportV2(ctx context.Context, number string, opts Rel
 		return fmt.Errorf("releasing transport %s: %w", number, err)
 	}
 
-	return releaseOutcome(number, parseReleaseReports(resp.Body))
+	reports, err := parseReleaseReports(resp.Body)
+	if err != nil {
+		return fmt.Errorf("releasing transport %s: %w", number, err)
+	}
+	return releaseOutcome(number, reports)
 }
 
 // releaseOutcome turns a release answer into an error unless it says the
