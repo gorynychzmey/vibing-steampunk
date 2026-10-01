@@ -260,13 +260,17 @@ func (c *Client) tableColumns(ctx context.Context, table string) ([]string, erro
 	return out, nil
 }
 
-// columnHint names the columns a table does have, the likely ones first.
+// columnHint names the columns a table does have, the likely ones first. A
+// table that has the column gets no list: in a join the refused name is then
+// qualified with the wrong table or alias, not misspelled.
 func columnHint(table, col string, cols []string) string {
-	var close []string
 	for _, c := range cols {
 		if c == col {
-			continue
+			return fmt.Sprintf("%s does have column %s; check the table or alias it is qualified with", table, col)
 		}
+	}
+	var close []string
+	for _, c := range cols {
 		if strings.Contains(c, col) || strings.Contains(col, c) && len(c) > 2 || editDistance(c, col) <= 2 {
 			close = append(close, c)
 		}

@@ -101,6 +101,22 @@ func TestExplainQueryError_UnknownColumnListsTheRealOnes(t *testing.T) {
 	}
 }
 
+// In a join with the wrong qualifier, one of the tables does have the column;
+// its hint must not claim otherwise.
+func TestColumnHint_TableThatHasTheColumn(t *testing.T) {
+	cols := []string{"KUNNR", "VKORG", "VKBUR"}
+	has := columnHint("KNVV", "VKBUR", cols)
+	if strings.Contains(has, "has no column") {
+		t.Errorf("hint for a table with the column says it has none: %s", has)
+	}
+	if !strings.Contains(has, "KNVV does have column VKBUR") {
+		t.Errorf("hint does not say the table has the column: %s", has)
+	}
+	if missing := columnHint("KNVV", "VKBURX", cols); !strings.HasPrefix(missing, "KNVV has no column VKBURX") {
+		t.Errorf("hint for a missing column: %s", missing)
+	}
+}
+
 func TestExplainQueryError_ClientFieldAndPassThrough(t *testing.T) {
 	c, _ := newTransportTestClient(t, nil)
 	xml := `<exc:exception><message lang="EN">The client field &quot;MANDT&quot; cannot be specified in the WHERE condition.</message></exc:exception>`
