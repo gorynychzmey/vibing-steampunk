@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/oisee/open-rfc-go/rfc"
 )
@@ -96,32 +97,16 @@ func ReadIDoc(ctx context.Context, c *rfc.Client, number string, opts IDocOption
 		opts.MaxSegments = 500
 	}
 
-	opened, err := c.Call(ctx, "EDI_DOCUMENT_OPEN_FOR_READ", rfc.Params{"DOCUMENT_NUMBER": number})
+	doc, rows, statusRows, err := readOpenedIDoc(ctx, c, number)
 	if err != nil {
-		return nil, fmt.Errorf("IDoc %s: %w", strings.TrimLeft(number, "0"), err)
+		return nil, err
 	}
-	defer func() {
-		_, _ = c.Call(ctx, "EDI_DOCUMENT_CLOSE_READ", rfc.Params{"DOCUMENT_NUMBER": number})
-	}()
-
-	doc := &IDoc{Number: strings.TrimLeft(number, "0"), Control: nonEmpty(asRecord(opened.Get("IDOC_CONTROL")))}
-
-	segs, err := c.Call(ctx, "EDI_SEGMENTS_GET_ALL", rfc.Params{"DOCUMENT_NUMBER": number})
-	if err != nil {
-		return nil, fmt.Errorf("EDI_SEGMENTS_GET_ALL: %w", err)
-	}
-	rows := segs.Table("IDOC_CONTAINERS")
-	doc.SegmentCount = len(rows)
-
-	if st, err := c.Call(ctx, "EDI_DOCUMENT_READ_ALL_STATUS", rfc.Params{"DOCUMENT_NUMBER": number}); err == nil {
-		rows := st.Table("INT_EDIDS")
-		doc.Status = statusRecords(rows, messageTexts(ctx, c, rows))
+	if statusRows != nil {
+		doc.Status = statusRecords(statusRows, messageTexts(ctx, c, statusRows))
 		meanings := statusMeanings(ctx, c)
 		for i := range doc.Status {
 			doc.Status[i].Meaning = meanings[doc.Status[i].Status]
 		}
-	} else {
-		doc.Warnings = append(doc.Warnings, "status records unavailable: "+err.Error())
 	}
 
 	var layouts map[string][]segmentField
@@ -143,11 +128,54 @@ func ReadIDoc(ctx context.Context, c *rfc.Client, number string, opts IDocOption
 		}
 	}
 
-	doc.Segments = buildSegments(rows, layouts, opts)
-	if len(doc.Segments) >= opts.MaxSegments && doc.SegmentCount > len(doc.Segments) {
-		doc.Warnings = append(doc.Warnings, fmt.Sprintf("showing %d of %d segments; narrow with \"segment\" or raise \"max_segments\"", len(doc.Segments), doc.SegmentCount))
+	var matched int
+	doc.Segments, matched = buildSegments(rows, layouts, opts)
+	if matched > len(doc.Segments) {
+		doc.Warnings = append(doc.Warnings, fmt.Sprintf("showing %d of %d segments; narrow with \"segment\" or raise \"max_segments\"", len(doc.Segments), matched))
 	}
 	return doc, nil
+}
+
+// readOpenedIDoc opens the IDoc, reads its segments and status records, and
+// closes it again. The EDI document API keeps the opened document in the
+// session, so all four calls run on one pinned connection; Client.Call could
+// put each on another. The status rows are nil when they could not be read.
+func readOpenedIDoc(ctx context.Context, c *rfc.Client, number string) (*IDoc, []map[string]any, []map[string]any, error) {
+	s, err := c.Pin(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer s.Close()
+
+	opened, err := s.Call(ctx, "EDI_DOCUMENT_OPEN_FOR_READ", rfc.Params{"DOCUMENT_NUMBER": number})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("IDoc %s: %w", strings.TrimLeft(number, "0"), err)
+	}
+	defer func() {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_, _ = s.Call(cctx, "EDI_DOCUMENT_CLOSE_READ", rfc.Params{"DOCUMENT_NUMBER": number})
+	}()
+
+	doc := &IDoc{Number: strings.TrimLeft(number, "0"), Control: nonEmpty(asRecord(opened.Get("IDOC_CONTROL")))}
+
+	segs, err := s.Call(ctx, "EDI_SEGMENTS_GET_ALL", rfc.Params{"DOCUMENT_NUMBER": number})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("EDI_SEGMENTS_GET_ALL: %w", err)
+	}
+	rows := segs.Table("IDOC_CONTAINERS")
+	doc.SegmentCount = len(rows)
+
+	st, err := s.Call(ctx, "EDI_DOCUMENT_READ_ALL_STATUS", rfc.Params{"DOCUMENT_NUMBER": number})
+	if err != nil {
+		doc.Warnings = append(doc.Warnings, "status records unavailable: "+err.Error())
+		return doc, rows, nil, nil
+	}
+	statusRows := st.Table("INT_EDIDS")
+	if statusRows == nil {
+		statusRows = []map[string]any{}
+	}
+	return doc, rows, statusRows, nil
 }
 
 // segmentLayouts reads the field layout of every segment of a basic type and
@@ -214,16 +242,18 @@ func missingSegmentTypes(rows []map[string]any, layouts map[string][]segmentFiel
 
 // buildSegments turns EDIDD rows into segments, cutting SDATA into fields
 // where a layout is known.
-func buildSegments(rows []map[string]any, layouts map[string][]segmentField, opts IDocOptions) []IDocSegment {
+func buildSegments(rows []map[string]any, layouts map[string][]segmentField, opts IDocOptions) ([]IDocSegment, int) {
 	filter := strings.ToUpper(strings.TrimSpace(opts.Segment))
 	var out []IDocSegment
+	matched := 0
 	for _, r := range rows {
 		name := str(r["SEGNAM"])
 		if filter != "" && !strings.HasPrefix(name, filter) {
 			continue
 		}
+		matched++
 		if len(out) >= opts.MaxSegments {
-			break
+			continue
 		}
 		seg := IDocSegment{
 			Number: strings.TrimLeft(str(r["SEGNUM"]), "0"),
@@ -242,7 +272,7 @@ func buildSegments(rows []map[string]any, layouts map[string][]segmentField, opt
 		}
 		out = append(out, seg)
 	}
-	return out
+	return out, matched
 }
 
 // cutFields cuts SDATA at the layout's offsets. Offsets count characters, as
@@ -302,19 +332,34 @@ func statusRecords(rows []map[string]any, texts map[string]string) []IDocStatus 
 }
 
 // fillStatusText replaces the placeholders of a status text: &1..&4 by
-// position, and bare & in order.
+// position, a bare & by the next parameter in order, && by a literal &. It
+// reads the template once, so an & inside an inserted value stays as it is.
 func fillStatusText(text string, params ...string) string {
-	for i, p := range params {
-		text = strings.ReplaceAll(text, "&"+strconv.Itoa(i+1), p)
-	}
-	for _, p := range params {
-		i := strings.Index(text, "&")
-		if i < 0 {
-			break
+	var b strings.Builder
+	next := 0
+	for i := 0; i < len(text); i++ {
+		if text[i] != '&' {
+			b.WriteByte(text[i])
+			continue
 		}
-		text = text[:i] + p + text[i+1:]
+		if i+1 < len(text) && text[i+1] == '&' {
+			b.WriteByte('&')
+			i++
+			continue
+		}
+		if i+1 < len(text) && text[i+1] >= '1' && text[i+1] <= '9' {
+			if n := int(text[i+1] - '1'); n < len(params) {
+				b.WriteString(params[n])
+			}
+			i++
+			continue
+		}
+		if next < len(params) {
+			b.WriteString(params[next])
+			next++
+		}
 	}
-	return strings.TrimSpace(text)
+	return strings.TrimSpace(b.String())
 }
 
 // asRecord turns a structure from an RFC result into strings.

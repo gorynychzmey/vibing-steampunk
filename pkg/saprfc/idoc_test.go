@@ -46,18 +46,22 @@ func TestBuildSegments_FilterRawAndLimit(t *testing.T) {
 		{"SEGNUM": "000003", "PSGNUM": "000001", "HLEVEL": "02", "SEGNAM": "ZE1X", "SDATA": "raw data   "},
 	}
 	layouts := map[string][]segmentField{"E1EDKA1": {{"PARVW", 0, 3}, {"PARTN", 3, 17}}}
-	segs := buildSegments(rows, layouts, IDocOptions{MaxSegments: 10})
+	segs, _ := buildSegments(rows, layouts, IDocOptions{MaxSegments: 10})
 	if len(segs) != 3 || segs[1].Parent != "1" || segs[1].Level != "2" || len(segs[1].Fields) != 2 {
 		t.Fatalf("segments %+v", segs)
 	}
 	if segs[2].Data != "raw data" || segs[2].Fields != nil {
 		t.Errorf("a segment without layout: %+v", segs[2])
 	}
-	if f := buildSegments(rows, layouts, IDocOptions{Segment: "e1edka", MaxSegments: 10}); len(f) != 1 || f[0].Name != "E1EDKA1" {
-		t.Errorf("filter %+v", f)
+	if f, n := buildSegments(rows, layouts, IDocOptions{Segment: "e1edka", MaxSegments: 10}); len(f) != 1 || f[0].Name != "E1EDKA1" || n != 1 {
+		t.Errorf("filter %+v (%d matched)", f, n)
 	}
-	if f := buildSegments(rows, layouts, IDocOptions{MaxSegments: 2}); len(f) != 2 {
-		t.Errorf("limit %d", len(f))
+	if f, n := buildSegments(rows, layouts, IDocOptions{MaxSegments: 2}); len(f) != 2 || n != 3 {
+		t.Errorf("limit %d of %d", len(f), n)
+	}
+	// Exactly the limit matches: nothing was cut, whatever else the IDoc has.
+	if f, n := buildSegments(rows, layouts, IDocOptions{Segment: "E1EDK", MaxSegments: 2}); len(f) != 2 || n != 2 {
+		t.Errorf("exact fit %d of %d", len(f), n)
 	}
 }
 
@@ -83,5 +87,25 @@ func TestStatusRecords(t *testing.T) {
 	}
 	if fillStatusText("&1 and &2", "a", "b") != "a and b" {
 		t.Error("numbered placeholders")
+	}
+}
+
+// The template is read once: an & inside an inserted value is not taken for
+// another placeholder, and && stays a literal &.
+func TestFillStatusText_InsertedAmpersands(t *testing.T) {
+	for _, c := range []struct {
+		text   string
+		params []string
+		want   string
+	}{
+		{"&1 and &2", []string{"A&B", "C"}, "A&B and C"},
+		{"& then &", []string{"A&B", "C"}, "A&B then C"},
+		{"&2 before &1", []string{"x", "y"}, "y before x"},
+		{"R&&D for &1", []string{"z"}, "R&D for z"},
+		{"&3 missing", []string{"a"}, "missing"},
+	} {
+		if got := fillStatusText(c.text, c.params...); got != c.want {
+			t.Errorf("fillStatusText(%q, %q) = %q, want %q", c.text, c.params, got, c.want)
+		}
 	}
 }
