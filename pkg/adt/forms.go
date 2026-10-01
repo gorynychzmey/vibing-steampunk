@@ -101,30 +101,30 @@ func FormObjectURL(formType, name string) string {
 	return "/sap/bc/adt/vit/wb/object_type/" + kind + "/object_name/" + url.PathEscape(strings.ToUpper(name))
 }
 
-func formRequestParams(formType, name, language string) (map[string]any, string, error) {
+func formRequestParams(formType, name, language string) (p map[string]any, t, normalized string, err error) {
 	t, ok := NormalizeFormType(formType)
 	if !ok {
-		return nil, "", fmt.Errorf("form type %q is not one of SSFO, FORM, SFPF, SFPI", formType)
+		return nil, "", "", fmt.Errorf("form type %q is not one of SSFO, FORM, SFPF, SFPI", formType)
 	}
 	name = strings.ToUpper(strings.TrimSpace(name))
 	if name == "" {
-		return nil, "", fmt.Errorf("a form name is required")
+		return nil, "", "", fmt.Errorf("a form name is required")
 	}
-	p := map[string]any{"type": t, "name": name}
+	p = map[string]any{"type": t, "name": name}
 	if language = strings.ToUpper(strings.TrimSpace(language)); language != "" {
 		p["language"] = language
 	}
-	return p, t, nil
+	return p, t, name, nil
 }
 
 // GetFormInfo reports whether a form exists, its package, original language,
 // languages and whether it has an inactive version.
 func (c *Client) GetFormInfo(ctx context.Context, ws formBridge, formType, name string) (*FormInfo, error) {
-	p, _, err := formRequestParams(formType, name, "")
+	p, _, _, err := formRequestParams(formType, name, "")
 	if err != nil {
 		return nil, err
 	}
-	if err := c.checkSafety(OpRead, "GetFormInfo"); err != nil {
+	if err = c.checkSafety(OpRead, "GetFormInfo"); err != nil {
 		return nil, err
 	}
 	return formInfo(ctx, ws, p)
@@ -145,11 +145,11 @@ func formInfo(ctx context.Context, ws formBridge, p map[string]any) (*FormInfo, 
 // ReadForm reads a form as a document. For an Adobe form, a language reads that
 // language's layout (XDP) instead of the form.
 func (c *Client) ReadForm(ctx context.Context, ws formBridge, formType, name, language string) (*FormContent, error) {
-	p, t, err := formRequestParams(formType, name, language)
+	p, t, formName, err := formRequestParams(formType, name, language)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.checkSafety(OpRead, "ReadForm"); err != nil {
+	if err = c.checkSafety(OpRead, "ReadForm"); err != nil {
 		return nil, err
 	}
 	data, err := ws.FormRequest(ctx, "read", p)
@@ -161,7 +161,7 @@ func (c *Client) ReadForm(ctx context.Context, ws formBridge, formType, name, la
 		MimeType       string `json:"mimeType"`
 		ContentBase64  string `json:"contentBase64"`
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err = json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("form service answer: %w", err)
 	}
 	content, err := base64.StdEncoding.DecodeString(raw.ContentBase64)
@@ -172,7 +172,7 @@ func (c *Client) ReadForm(ctx context.Context, ws formBridge, formType, name, la
 	if t != FormTypeAdobeForm {
 		lang = "" // only an Adobe layout is one language's
 	}
-	return &FormContent{Type: t, Name: p["name"].(string), Language: lang,
+	return &FormContent{Type: t, Name: formName, Language: lang,
 		MasterLanguage: raw.MasterLanguage, MimeType: raw.MimeType, Content: string(content)}, nil
 }
 
@@ -190,7 +190,7 @@ type formWriteAnswer struct {
 // does not activate, the form as it was is written back and activated, so the
 // system is left with the old form rather than none.
 func (c *Client) WriteForm(ctx context.Context, ws formBridge, opts FormWriteOptions) (*FormWriteResult, error) {
-	p, t, err := formRequestParams(opts.Type, opts.Name, opts.Language)
+	p, t, formName, err := formRequestParams(opts.Type, opts.Name, opts.Language)
 	if err != nil {
 		return nil, err
 	}
@@ -214,11 +214,11 @@ func (c *Client) WriteForm(ctx context.Context, ws formBridge, opts FormWriteOpt
 		m.Op = OpCreate
 		m.Package = strings.ToUpper(strings.TrimSpace(opts.Package))
 	}
-	if err := c.checkMutation(ctx, m); err != nil {
+	if err = c.checkMutation(ctx, m); err != nil {
 		return nil, err
 	}
 	if transport != "" {
-		if err := c.config.Safety.CheckTransport(transport, "WriteForm", true); err != nil {
+		if err = c.config.Safety.CheckTransport(transport, "WriteForm", true); err != nil {
 			return nil, err
 		}
 	}
@@ -238,7 +238,7 @@ func (c *Client) WriteForm(ctx context.Context, ws formBridge, opts FormWriteOpt
 		return nil, err
 	}
 
-	res := &FormWriteResult{Type: t, Name: p["name"].(string), TestRun: opts.TestRun, Saved: ans.Saved, Created: ans.Created}
+	res := &FormWriteResult{Type: t, Name: formName, TestRun: opts.TestRun, Saved: ans.Saved, Created: ans.Created}
 	if lang, ok := p["language"].(string); ok && t == FormTypeAdobeForm {
 		res.Language = lang
 	}
