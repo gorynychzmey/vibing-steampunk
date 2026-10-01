@@ -57,7 +57,11 @@ func (s *Server) handleImportTransport(ctx context.Context, request mcp.CallTool
 	}
 	res, err := run(ctx)
 	if err != nil {
-		return newToolResultJSON(map[string]any{"error": err.Error(), "result": res}), nil
+		// The partial result stays, but the call is an error: a non-000 TMS
+		// code must not read as a successful tool call.
+		out := newToolResultJSON(map[string]any{"error": err.Error(), "result": res})
+		out.IsError = true
+		return out, nil
 	}
 	return newToolResultJSON(res), nil
 }

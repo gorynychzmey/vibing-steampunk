@@ -50,8 +50,9 @@ type ImportStep struct {
 // ImportedRequest is one request of an import.
 type ImportedRequest struct {
 	Request string `json:"request"`
-	// RetCode is CTS_API_IMPORT_CHANGE_REQUEST's code for the request:
-	// 000 tp rc 0-7, 008 rc 8, 012 anything else.
+	// RetCode is TMS's code for the request (see importRetCodeText): 000
+	// imported (tp rc 0-7), 008 TMS could not start, 009 tp rc 8, 010 tp rc
+	// above 8, 011 no authorization, 012 another TMS error, 013 log unreadable.
 	RetCode string `json:"retcode"`
 	// Steps are the TPALOG rows this import added, and MaxRC the worst of them.
 	Steps []ImportStep `json:"steps,omitempty"`
@@ -191,7 +192,7 @@ func importLogs(ctx context.Context, call callFn, requests []string, since strin
 		return nil, fmt.Errorf("at least one request is required")
 	}
 	since = strings.TrimSpace(since)
-	if since != "" && !regexp.MustCompile(`^[0-9]{8,14}$`).MatchString(since) {
+	if since != "" && !regexp.MustCompile(`^([0-9]{8}|[0-9]{14})$`).MatchString(since) {
 		return nil, fmt.Errorf("since %q: want YYYYMMDD[hhmmss]", since)
 	}
 	byReq, err := readImportLog(ctx, call, reqs)
@@ -218,10 +219,13 @@ func importLogs(ctx context.Context, call callFn, requests []string, since strin
 // readImportLog reads the TPALOG rows of the requests, by request, in order.
 func readImportLog(ctx context.Context, call callFn, reqs []string) (map[string][]ImportStep, error) {
 	quoted := make([]string, len(reqs))
+	// Separated by ", ": RFC_READ_TABLE's 72-character OPTIONS lines may
+	// break only between tokens, and an unbroken list of six requests is
+	// one token too long.
 	for i, r := range reqs {
 		quoted[i] = "'" + r + "'"
 	}
-	rows, err := readTable(ctx, call, "TPALOG", "TRKORR IN ("+strings.Join(quoted, ",")+")",
+	rows, err := readTable(ctx, call, "TPALOG", "TRKORR IN ("+strings.Join(quoted, ", ")+")",
 		[]string{"TRKORR", "TRCLI", "TRSTEP", "RETCODE", "TRTIME"}, 0)
 	if err != nil {
 		return nil, err

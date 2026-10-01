@@ -174,6 +174,8 @@ func TestImportLogs_RefusesBeforeReading(t *testing.T) {
 		"no request":  {nil, ""},
 		"bad request": {[]string{"X' OR '1'='1"}, ""},
 		"bad since":   {[]string{"TR-EXAMPLE"}, "yesterday"},
+		"9 digits":    {[]string{"TR-EXAMPLE"}, "202601021"},
+		"13 digits":   {[]string{"TR-EXAMPLE"}, "2026010210000"},
 	} {
 		sys := &fakeSystem{sid: "PRD"}
 		if _, err := importLogs(context.Background(), sys.call, tc.reqs, tc.since); err == nil {
@@ -182,5 +184,27 @@ func TestImportLogs_RefusesBeforeReading(t *testing.T) {
 		if len(sys.calls) != 0 {
 			t.Errorf("%s: read before refusing", name)
 		}
+	}
+}
+
+// The request list is split over RFC_READ_TABLE's 72-character OPTIONS
+// lines, which break only between tokens: eight requests must still fit.
+func TestImportLogs_ManyRequestsFitTheOptionsLines(t *testing.T) {
+	var reqs []string
+	for i := 0; i < 8; i++ {
+		reqs = append(reqs, "TR-EXAMPL"+string(rune('0'+i)))
+	}
+	var options []map[string]any
+	call := func(_ context.Context, fm string, in rfc.Params) (exports, error) {
+		if fm == "RFC_READ_TABLE" {
+			options, _ = in["OPTIONS"].([]map[string]any)
+		}
+		return fakeExports{tables: map[string][]map[string]any{"FIELDS": {}}}, nil
+	}
+	if _, err := importLogs(context.Background(), call, reqs, ""); err != nil {
+		t.Fatalf("importLogs with %d requests: %v", len(reqs), err)
+	}
+	if len(options) < 2 {
+		t.Errorf("OPTIONS = %v, want the list split over several lines", options)
 	}
 }

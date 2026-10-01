@@ -2128,13 +2128,16 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("GetAsyncResult") {
 		s.mcpServer.AddTool(mcp.NewTool("GetAsyncResult",
-			mcp.WithDescription("Get result of an async task by ID. Returns status (running/completed/error) and result when done."),
+			mcp.WithDescription("Get result of an async task by ID (a report from RunReportAsync, or a transport import started with async). Returns status (running/completed/error) and result when done."),
 			mcp.WithString("task_id",
-				mcp.Description("Task ID from RunReportAsync"),
+				mcp.Description("Task ID from RunReportAsync or from an async transport import"),
 				mcp.Required(),
 			),
 			mcp.WithBoolean("wait",
 				mcp.Description("If true, block until task completes (max 60s). Default: false (poll)"),
+			),
+			mcp.WithNumber("wait_seconds",
+				mcp.Description("Block up to this many seconds for the task to complete (overrides wait); for long tasks such as an import"),
 			),
 		), s.handleGetAsyncResult)
 	}

@@ -465,6 +465,11 @@ func resolveConfig(cmd *cobra.Command) {
 	if cfg.SystemName == "" {
 		cfg.SystemName = viper.GetString("SYSTEM")
 	}
+	// allow_transport_import from this server's .vsp.json entry, unless the
+	// flag or SAP_ALLOW_TRANSPORT_IMPORT said otherwise.
+	if !cmd.Flags().Changed("allow-transport-import") && !viper.IsSet("ALLOW_TRANSPORT_IMPORT") {
+		cfg.AllowTransportImport = systemAllowsImport(cfg.SystemName)
+	}
 	if !cmd.Flags().Changed("transport-choice") {
 		if v := viper.GetString("TRANSPORT_CHOICE"); v != "" {
 			cfg.TransportChoice = v
@@ -863,4 +868,24 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// systemAllowsImport reads allow_transport_import of the named .vsp.json
+// system, or of the default one when no name is given.
+func systemAllowsImport(name string) bool {
+	systems, _, err := config.LoadSystems()
+	if err != nil || systems == nil {
+		return false
+	}
+	if name == "" {
+		name = systems.Default
+	}
+	if name == "" {
+		return false
+	}
+	sys, err := systems.GetSystem(name)
+	if err != nil {
+		return false
+	}
+	return sys.AllowTransportImport
 }
