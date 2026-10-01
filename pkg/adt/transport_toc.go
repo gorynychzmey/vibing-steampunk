@@ -2,6 +2,7 @@ package adt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -42,9 +43,43 @@ type TransportOfCopiesResult struct {
 	Target      string `json:"target"`
 	Description string `json:"description"`
 	// CopiedFrom are the requests or tasks whose object lists were copied.
-	CopiedFrom []string            `json:"copiedFrom,omitempty"`
-	Objects    []TransportObjectV2 `json:"objects,omitempty"`
-	Released   bool                `json:"released"`
+	CopiedFrom []string `json:"copiedFrom,omitempty"`
+	// CopiedEntries are the entries of the lists in CopiedFrom.
+	CopiedEntries []string `json:"copiedEntries,omitempty"`
+	// Failed are the lists TR_COPY_COMM did not copy, with the entries they
+	// hold and why.
+	Failed []TransportOfCopiesFailure `json:"failed,omitempty"`
+	// Objects is the transport of copies' object list as read back after the
+	// copy.
+	Objects  []TransportObjectV2 `json:"objects,omitempty"`
+	Released bool                `json:"released"`
+	// ReleaseStatus says what happened to the release: "not requested",
+	// "released", "not attempted: ..." or "failed: ...".
+	ReleaseStatus string `json:"releaseStatus"`
+}
+
+// TransportOfCopiesFailure is one request or task whose list was not copied.
+type TransportOfCopiesFailure struct {
+	From    string   `json:"from"`
+	Entries []string `json:"entries,omitempty"`
+	Error   string   `json:"error"`
+}
+
+// incomplete is the error for a transport of copies that exists but is not
+// what was asked for: what it holds, what is missing, and its release.
+func (r *TransportOfCopiesResult) incomplete(what string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "transport of copies %s of %s is incomplete: %s", r.Transport, r.Source, what)
+	if len(r.CopiedFrom) > 0 {
+		fmt.Fprintf(&b, "; copied from %s: %s", strings.Join(r.CopiedFrom, ", "), strings.Join(r.CopiedEntries, ", "))
+	} else {
+		b.WriteString("; nothing was copied")
+	}
+	for _, f := range r.Failed {
+		fmt.Fprintf(&b, "; not copied from %s (%s): %s", f.From, strings.Join(f.Entries, ", "), f.Error)
+	}
+	fmt.Fprintf(&b, "; release: %s", r.ReleaseStatus)
+	return errors.New(b.String())
 }
 
 // CopyToTransportOfCopies creates a transport of copies for target and copies
@@ -97,11 +132,14 @@ func (c *Client) copyToTransportOfCopies(ctx context.Context, bridge functionBri
 		return nil, err
 	}
 
-	res := &TransportOfCopiesResult{Source: source, Transport: number, Target: target, Description: description}
-	for _, n := range from {
+	res := &TransportOfCopiesResult{Source: source, Transport: number, Target: target, Description: description,
+		ReleaseStatus: "not requested"}
+	// Every list is tried, so the result says of each whether it was copied;
+	// one that fails does not hide the state of the others.
+	for _, src := range from {
 		out, err := bridge.CallRFC(ctx, "TR_COPY_COMM", map[string]any{
 			"WI_DIALOG":                "", // no dialog; an empty value turns the default 'X' off
-			"WI_TRKORR_FROM":           n,
+			"WI_TRKORR_FROM":           src.Number,
 			"WI_TRKORR_TO":             number,
 			"WI_WITHOUT_DOCUMENTATION": "X",
 		})
@@ -109,13 +147,21 @@ func (c *Client) copyToTransportOfCopies(ctx context.Context, bridge functionBri
 			err = fmt.Errorf("sy-subrc %d%s", out.Subrc, withMessage(out.Message))
 		}
 		if err != nil {
-			return res, fmt.Errorf("TR_COPY_COMM %s into %s: %v; %s exists, not released, holding what was copied before",
-				n, number, err, number)
+			res.Failed = append(res.Failed, TransportOfCopiesFailure{From: src.Number, Entries: entryNames(src.Entries),
+				Error: fmt.Sprintf("TR_COPY_COMM: %v", err)})
+			continue
 		}
-		res.CopiedFrom = append(res.CopiedFrom, n)
+		res.CopiedFrom = append(res.CopiedFrom, src.Number)
+		res.CopiedEntries = append(res.CopiedEntries, entryNames(src.Entries)...)
 	}
 	if d, err := c.GetTransport(ctx, number); err == nil {
 		res.Objects = d.Objects
+	}
+	if len(res.Failed) > 0 {
+		if opts.Release {
+			res.ReleaseStatus = "not attempted: the copy is incomplete"
+		}
+		return res, res.incomplete(fmt.Sprintf("%d of %d list(s) failed to copy", len(res.Failed), len(from)))
 	}
 
 	if opts.Release {
@@ -123,9 +169,11 @@ func (c *Client) copyToTransportOfCopies(ctx context.Context, bridge functionBri
 		// release comes back asking whether to release anyway -- the question
 		// SE01 asks too. For a transport of copies the answer is always yes.
 		if err := c.ReleaseTransportV2(ctx, number, ReleaseTransportOptions{IgnoreLocks: true}); err != nil {
-			return res, fmt.Errorf("%s is filled but was not released: %w", number, err)
+			res.ReleaseStatus = fmt.Sprintf("failed: %v", err)
+			return res, res.incomplete("it is filled but was not released")
 		}
 		res.Released = true
+		res.ReleaseStatus = "released"
 	}
 	return res, nil
 }
@@ -145,23 +193,43 @@ func (c *Client) CheckTransportOfCopies(source string) error {
 	return c.config.Safety.CheckTransport(strings.ToUpper(strings.TrimSpace(source)), op, false)
 }
 
+// copySource is one request or task whose object list TR_COPY_COMM copies,
+// with the entries it holds.
+type copySource struct {
+	Number  string
+	Entries []TransportObjectV2
+}
+
 // copySources names what TR_COPY_COMM has to copy from. It copies only the
 // entries of the request it is given, not those of its tasks: a modifiable
 // request keeps its objects in its tasks, so each task that holds some is
 // copied, as SE01's include-objects does. Release moves the tasks' entries
 // into the request, so a released one is copied from the request alone.
-func copySources(d *TransportDetails) []string {
+func copySources(d *TransportDetails) []copySource {
 	if d.Status != "D" && d.Status != "L" {
 		if len(d.Objects) > 0 {
-			return []string{d.Number}
+			return []copySource{{Number: d.Number, Entries: d.Objects}}
 		}
 		return nil
 	}
-	var out []string
+	var out []copySource
 	for _, t := range d.Tasks {
 		if len(t.Objects) > 0 {
-			out = append(out, t.Number)
+			out = append(out, copySource{Number: t.Number, Entries: t.Objects})
 		}
+	}
+	return out
+}
+
+// entryName is an entry as E071 keys it: "R3TR PROG ZDEMO".
+func entryName(o TransportObjectV2) string {
+	return strings.TrimSpace(o.PgmID + " " + o.Type + " " + o.Name)
+}
+
+func entryNames(objs []TransportObjectV2) []string {
+	out := make([]string, 0, len(objs))
+	for _, o := range objs {
+		out = append(out, entryName(o))
 	}
 	return out
 }

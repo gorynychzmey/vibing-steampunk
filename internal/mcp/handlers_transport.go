@@ -489,11 +489,23 @@ func (s *Server) handleCopyToTransportOfCopies(ctx context.Context, request mcp.
 	if err := s.ensureDebugWSClient(ctx); err != nil {
 		return newToolResultError(fmt.Sprintf("copying a request's objects needs ZADT_VSP's function bridge: %v", err)), nil
 	}
-	res, err := s.adtClient.CopyToTransportOfCopies(ctx, s.debugWSClient, source, opts)
-	if err != nil {
-		return newToolResultJSON(map[string]any{"error": err.Error(), "result": res}), nil
+	return transportOfCopiesResult(s.adtClient.CopyToTransportOfCopies(ctx, s.debugWSClient, source, opts)), nil
+}
+
+// transportOfCopiesResult is the tool result for a copy. A transport of
+// copies that exists but is not what was asked for -- a list not copied, a
+// release that failed -- is reported with what was done, marked as an error,
+// never as success.
+func transportOfCopiesResult(res *adt.TransportOfCopiesResult, err error) *mcp.CallToolResult {
+	if err == nil {
+		return newToolResultJSON(res)
 	}
-	return newToolResultJSON(res), nil
+	if res == nil {
+		return newToolResultError(err.Error())
+	}
+	out := newToolResultJSON(map[string]any{"error": err.Error(), "result": res})
+	out.IsError = true
+	return out
 }
 
 // handleMoveTransportObject moves one entry between requests:

@@ -18,6 +18,8 @@ type fakeBridge struct {
 	mu    sync.Mutex
 	calls []map[string]any
 	subrc int
+	// failFrom makes TR_COPY_COMM from these requests or tasks fail.
+	failFrom map[string]bool
 }
 
 func (b *fakeBridge) CallRFC(_ context.Context, fn string, params map[string]any) (*RFCResult, error) {
@@ -28,6 +30,9 @@ func (b *fakeBridge) CallRFC(_ context.Context, fn string, params map[string]any
 		rec[k] = v
 	}
 	b.calls = append(b.calls, rec)
+	if b.failFrom[fmt.Sprint(params["WI_TRKORR_FROM"])] {
+		return &RFCResult{Subrc: 8, Message: "object list locked"}, nil
+	}
 	return &RFCResult{Subrc: b.subrc}, nil
 }
 
@@ -50,9 +55,10 @@ func transportXML(number, desc, status string, tasks map[string][]string) string
 }
 
 type tocServer struct {
-	mu       sync.Mutex
-	created  []string // create bodies
-	released []string // released numbers
+	mu          sync.Mutex
+	created     []string // create bodies
+	released    []string // released numbers
+	failRelease bool     // answer a release with a 500
 }
 
 func newTocClient(t *testing.T, source string, opts ...Option) (*Client, *tocServer) {
@@ -72,8 +78,15 @@ func newTocClient(t *testing.T, source string, opts ...Option) (*Client, *tocSer
 				`<tm:request tm:number="TR-TOC" tm:type="T"/></tm:root>`)
 		case r.Method == http.MethodPost && (strings.HasSuffix(path, "/newreleasejobs") || strings.HasSuffix(path, "/relwithignlock")):
 			ts.mu.Lock()
-			ts.released = append(ts.released, strings.TrimPrefix(path, "/sap/bc/adt/cts/transportrequests/"))
+			fail := ts.failRelease
+			if !fail {
+				ts.released = append(ts.released, strings.TrimPrefix(path, "/sap/bc/adt/cts/transportrequests/"))
+			}
 			ts.mu.Unlock()
+			if fail {
+				http.Error(w, "release refused: target QAS not reachable", http.StatusInternalServerError)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/transportrequests/TR-TOC"):
 			_, _ = io.WriteString(w, transportXML("TR-TOC", "ToC", "D", nil))
@@ -233,5 +246,76 @@ func TestTransportOfCopiesDescription_FitsE07T(t *testing.T) {
 	long := strings.Repeat("x", 80)
 	if got := transportOfCopiesDescription(long); len([]rune(got)) != 60 || !strings.HasPrefix(got, "ToC ") {
 		t.Errorf("description %q (%d runes), want 60 starting with \"ToC \"", got, len([]rune(got)))
+	}
+}
+
+// One list that fails to copy does not stop the others, and the result is an
+// error that names the transport of copies, what was copied, what was not,
+// and that the release was not attempted -- never a success.
+func TestCopyToTransportOfCopies_APartialCopyIsAnErrorThatSaysWhatWasDone(t *testing.T) {
+	src := transportXML("TR-SRC", "demo", "D", map[string][]string{
+		"TR-TASK1": {"ZDEMO_A"},
+		"TR-TASK2": {"ZDEMO_B"},
+	})
+	client, ts := newTocClient(t, src)
+	bridge := &fakeBridge{failFrom: map[string]bool{"TR-TASK2": true}}
+
+	res, err := client.copyToTransportOfCopies(context.Background(), bridge, "TR-SRC",
+		TransportOfCopiesOptions{Target: "QAS", Release: true})
+	if err == nil {
+		t.Fatal("a copy with a failed list was reported as success")
+	}
+	if got := copiedFrom(bridge); len(got) != 2 {
+		t.Errorf("TR_COPY_COMM called from %v, want both tasks tried", got)
+	}
+	if res == nil || res.Transport != "TR-TOC" {
+		t.Fatalf("result must name the transport of copies: %+v", res)
+	}
+	if len(res.CopiedFrom) != 1 || res.CopiedFrom[0] != "TR-TASK1" ||
+		len(res.CopiedEntries) != 1 || res.CopiedEntries[0] != "R3TR PROG ZDEMO_A" {
+		t.Errorf("copied from %v entries %v, want TR-TASK1 with R3TR PROG ZDEMO_A", res.CopiedFrom, res.CopiedEntries)
+	}
+	if len(res.Failed) != 1 || res.Failed[0].From != "TR-TASK2" ||
+		len(res.Failed[0].Entries) != 1 || res.Failed[0].Entries[0] != "R3TR PROG ZDEMO_B" ||
+		!strings.Contains(res.Failed[0].Error, "object list locked") {
+		t.Errorf("failed = %+v, want TR-TASK2 with R3TR PROG ZDEMO_B and SAP's message", res.Failed)
+	}
+	if res.Released || !strings.HasPrefix(res.ReleaseStatus, "not attempted") {
+		t.Errorf("released=%v status=%q, want not attempted", res.Released, res.ReleaseStatus)
+	}
+	if len(ts.released) != 0 {
+		t.Errorf("released %v although the copy is incomplete", ts.released)
+	}
+	for _, want := range []string{"TR-TOC", "incomplete", "TR-TASK1", "R3TR PROG ZDEMO_A", "TR-TASK2", "R3TR PROG ZDEMO_B", "object list locked", "release: not attempted"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+}
+
+// A release that fails after a complete copy is an error that says the
+// transport of copies is filled and why it was not released.
+func TestCopyToTransportOfCopies_AFailedReleaseIsAnError(t *testing.T) {
+	src := transportXML("TR-SRC", "demo", "D", map[string][]string{"TR-TASK1": {"ZDEMO_A"}})
+	client, ts := newTocClient(t, src)
+	ts.mu.Lock()
+	ts.failRelease = true
+	ts.mu.Unlock()
+
+	res, err := client.copyToTransportOfCopies(context.Background(), &fakeBridge{}, "TR-SRC",
+		TransportOfCopiesOptions{Target: "QAS", Release: true})
+	if err == nil {
+		t.Fatal("a failed release was reported as success")
+	}
+	if res == nil || res.Released || !strings.HasPrefix(res.ReleaseStatus, "failed") {
+		t.Fatalf("result = %+v, want release status failed", res)
+	}
+	if len(res.CopiedFrom) != 1 || len(res.Failed) != 0 {
+		t.Errorf("copied %v failed %+v, want the copy itself complete", res.CopiedFrom, res.Failed)
+	}
+	for _, want := range []string{"TR-TOC", "R3TR PROG ZDEMO_A", "release: failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
 	}
 }
