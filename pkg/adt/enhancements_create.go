@@ -222,7 +222,7 @@ func (c *Client) writeEnhancementSource(ctx context.Context, enhoURL, source, tr
 		}
 	}
 	ctx = withMutationPackageChecked(ctx, enhoURL)
-	lock, err := c.LockObject(ctx, enhoURL, "MODIFY")
+	lock, err := c.LockObject(ctx, enhoURL, "MODIFY", transport)
 	if err != nil {
 		return fmt.Errorf("locking it to write the code failed: %w", err)
 	}

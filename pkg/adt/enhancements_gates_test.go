@@ -200,3 +200,52 @@ func TestCreateSourceCodePlugin_LockTransportRefusedReleasesTheLock(t *testing.T
 		dumpCalls(t, calls)
 	}
 }
+
+// A request named at creation goes out on the LOCK as well (#256), so the
+// lock, the write and the creation all name the same request.
+func TestEnhancementCreates_LockCarriesTheCreationTransport(t *testing.T) {
+	for name, tc := range map[string]struct {
+		lockPath string
+		create   func(*Client) error
+	}{
+		"source code plug-in": {testEnhoxhhURL, func(c *Client) error {
+			_, err := c.CreateSourceCodePlugin(context.Background(), testPluginOptions("ZPKG", "TR-EXAMPLE-1", "WRITE 'x'."))
+			return err
+		}},
+		"BAdI implementation": {testEnhoxhbURL, func(c *Client) error {
+			_, err := c.CreateBadiImplementation(context.Background(), testBadiOptions("ZPKG", "TR-EXAMPLE-1"))
+			return err
+		}},
+	} {
+		rec := &adtRecorder{}
+		client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.Contains(r.URL.Path, "/checkruns"):
+				w.Header().Set("Content-Type", "application/vnd.sap.adt.checkmessages+xml")
+				_, _ = io.WriteString(w, testEmptyCheckXML)
+			case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+				w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+				_, _ = io.WriteString(w, testLockWithCorrNrXML)
+			case r.Method == http.MethodPost && (r.URL.Path == enhoxhhCollection || r.URL.Path == enhoxhbCollection):
+				w.WriteHeader(http.StatusCreated)
+			default:
+				w.WriteHeader(http.StatusOK)
+			}
+		}, WithTransportChoice("off"), WithAllowTransportableEdits())
+
+		if err := tc.create(client); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		calls := rec.snapshot()
+		lockAt := indexOfCall(calls, func(c wireCall) bool {
+			return c.path == tc.lockPath && c.query.Get("_action") == "LOCK"
+		})
+		if lockAt < 0 {
+			t.Fatalf("%s: no LOCK; trace:\n%v", name, calls)
+		}
+		if got := calls[lockAt].query.Get("corrNr"); got != "TR-EXAMPLE-1" {
+			t.Errorf("%s: LOCK corrNr = %q, want the creation's TR-EXAMPLE-1", name, got)
+			dumpCalls(t, calls)
+		}
+	}
+}

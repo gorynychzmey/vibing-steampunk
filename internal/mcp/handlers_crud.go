@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
 
@@ -80,7 +81,9 @@ func (s *Server) handleLockObject(ctx context.Context, request mcp.CallToolReque
 		accessMode = am
 	}
 
-	result, err := s.adtClient.LockObject(ctx, objectURL, accessMode)
+	transport, _ := request.GetArguments()["transport"].(string)
+
+	result, err := s.adtClient.LockObject(ctx, objectURL, accessMode, transport)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to lock object: %v", err)), nil
 	}
@@ -150,7 +153,7 @@ func (s *Server) handleUpdateSource(ctx context.Context, request mcp.CallToolReq
 		}
 	}
 
-	err := s.withObjectLock(updateCtx, objectURL, lockHandle, func(handle string) error {
+	err := s.withObjectLock(updateCtx, objectURL, lockHandle, transport, func(handle string) error {
 		return s.adtClient.UpdateSource(updateCtx, sourceURL, source, handle, transport)
 	})
 	if err != nil {
@@ -250,6 +253,10 @@ func (s *Server) handleCreateObject(ctx context.Context, request mcp.CallToolReq
 		}
 		output, _ := json.MarshalIndent(fmResult, "", "  ")
 		return mcp.NewToolResultText(string(output)), nil
+	}
+
+	if opts.ObjectType == adt.ObjectTypeMessageClass {
+		return s.createMessageClass(ctx, opts, request.GetArguments())
 	}
 
 	err := s.adtClient.CreateObject(ctx, opts)
@@ -593,7 +600,7 @@ func (s *Server) handleDeleteObject(ctx context.Context, request mcp.CallToolReq
 		}
 	}
 
-	err := s.withObjectLockConsumed(objCtx, objectURL, lockHandle, func(handle string) error {
+	err := s.withObjectLockConsumed(objCtx, objectURL, lockHandle, transport, func(handle string) error {
 		return s.adtClient.DeleteObject(objCtx, objectURL, handle, transport)
 	})
 	if err != nil {

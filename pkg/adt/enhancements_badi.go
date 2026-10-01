@@ -90,7 +90,7 @@ func (c *Client) CreateBadiImplementation(ctx context.Context, opts BadiImplemen
 		return "", fmt.Errorf("creating %s: %w", opts.Name, err)
 	}
 
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
 	if err != nil {
 		return objectURL, fmt.Errorf("created %s, but locking it to add the implementation failed: %w", opts.Name, err)
 	}
