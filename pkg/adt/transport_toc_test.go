@@ -59,6 +59,9 @@ type tocServer struct {
 	created     []string // create bodies
 	released    []string // released numbers
 	failRelease bool     // answer a release with a 500
+	// objects answers the repository search: name -> {ADT type, package}.
+	objects  map[string][2]string
+	searches []string // names searched for
 }
 
 func newTocClient(t *testing.T, source string, opts ...Option) (*Client, *tocServer) {
@@ -88,6 +91,20 @@ func newTocClient(t *testing.T, source string, opts ...Option) (*Client, *tocSer
 				return
 			}
 			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/informationsystem/search"):
+			name := strings.ToUpper(r.URL.Query().Get("query"))
+			ts.mu.Lock()
+			ts.searches = append(ts.searches, name)
+			hit, ok := ts.objects[name]
+			ts.mu.Unlock()
+			w.Header().Set("Content-Type", "application/xml")
+			refs := ""
+			if ok {
+				refs = fmt.Sprintf(`<adtcore:objectReference adtcore:uri="/sap/bc/adt/x/%s" adtcore:type="%s" adtcore:name="%s" adtcore:packageName="%s"/>`,
+					strings.ToLower(name), hit[0], name, hit[1])
+			}
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">`+
+				refs+`</adtcore:objectReferences>`)
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/transportrequests/TR-TOC"):
 			_, _ = io.WriteString(w, transportXML("TR-TOC", "ToC", "D", nil))
 		case r.Method == http.MethodGet && strings.Contains(path, "/transportrequests/"):
@@ -399,5 +416,85 @@ func TestCopyToTransportOfCopies_OnlyRequestLevelEntriesRefusesNamingThem(t *tes
 	}
 	if len(ts.created) != 0 {
 		t.Error("created a request before refusing")
+	}
+}
+
+// entriesXML is a modifiable request with one task holding the given entries
+// ("PGMID TYPE NAME").
+func entriesXML(entries ...string) string {
+	var objs strings.Builder
+	for _, e := range entries {
+		f := strings.SplitN(e, " ", 3)
+		fmt.Fprintf(&objs, `<tm:abap_object tm:pgmid="%s" tm:type="%s" tm:name="%s"/>`, f[0], f[1], f[2])
+	}
+	return `<?xml version="1.0" encoding="utf-8"?><tm:root xmlns:tm="http://www.sap.com/cts/adt/tm">` +
+		`<tm:request tm:number="TR-SRC" tm:owner="TESTUSER" tm:desc="demo" tm:type="K" tm:status="D">` +
+		`<tm:all_objects>` + objs.String() + `</tm:all_objects>` +
+		`<tm:task tm:number="TR-TASK1" tm:parent="TR-SRC" tm:owner="TESTUSER" tm:status="D">` + objs.String() + `</tm:task>` +
+		`</tm:request></tm:root>`
+}
+
+// Under --allowed-packages, a transport of copies carries no object from a
+// package the server may not touch: the whole copy is refused before
+// anything is created, naming every offending object.
+func TestCopyToTransportOfCopies_RefusesObjectsOutsideTheAllowedPackages(t *testing.T) {
+	src := entriesXML(
+		"R3TR PROG ZDEMO_OK",
+		"R3TR PROG ZSAP_OTHER",
+		"LIMU METH ZCL_FOREIGN                   RUN",
+		"LIMU FUNC Z_SOME_FM",
+	)
+	client, ts := newTocClient(t, src, WithAllowedPackages("ZDEMO*"))
+	ts.objects = map[string][2]string{
+		"ZDEMO_OK":    {"PROG/P", "ZDEMO_PKG"},
+		"ZSAP_OTHER":  {"PROG/P", "ZOTHER_PKG"},
+		"ZCL_FOREIGN": {"CLAS/OC", "$TMP"},
+	}
+	bridge := &fakeBridge{}
+
+	_, err := client.copyToTransportOfCopies(context.Background(), bridge, "TR-SRC", TransportOfCopiesOptions{Target: "QAS"})
+	if err == nil {
+		t.Fatal("copied objects from packages outside the whitelist")
+	}
+	for _, want := range []string{"R3TR PROG ZSAP_OTHER", "ZOTHER_PKG", "LIMU METH ZCL_FOREIGN", "$TMP", "LIMU FUNC Z_SOME_FM"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "R3TR PROG ZDEMO_OK") {
+		t.Errorf("refusal names an allowed object: %v", err)
+	}
+	if len(ts.created) != 0 {
+		t.Error("created the transport of copies before refusing")
+	}
+	if got := copiedFrom(bridge); len(got) != 0 {
+		t.Errorf("TR_COPY_COMM called from %v after a refusal", got)
+	}
+}
+
+func TestCopyToTransportOfCopies_AllowedPackagesPass(t *testing.T) {
+	src := entriesXML("R3TR PROG ZDEMO_OK", "LIMU CINC ZCL_DEMO======================CCIMP", "LIMU METH ZCL_DEMO                      RUN")
+	client, ts := newTocClient(t, src, WithAllowedPackages("ZDEMO*"))
+	ts.objects = map[string][2]string{
+		"ZDEMO_OK": {"PROG/P", "ZDEMO_PKG"},
+		"ZCL_DEMO": {"CLAS/OC", "ZDEMO_PKG"},
+	}
+	if _, err := client.copyToTransportOfCopies(context.Background(), &fakeBridge{}, "TR-SRC", TransportOfCopiesOptions{Target: "QAS"}); err != nil {
+		t.Fatalf("refused objects inside the whitelist: %v", err)
+	}
+	// The class is looked up once for its two LIMU entries.
+	if len(ts.searches) != 2 {
+		t.Errorf("searched %v, want ZDEMO_OK and ZCL_DEMO once each", ts.searches)
+	}
+}
+
+// Without a whitelist nothing changes: no package lookup is sent.
+func TestCopyToTransportOfCopies_NoWhitelistSendsNoLookup(t *testing.T) {
+	client, ts := newTocClient(t, entriesXML("R3TR PROG ZSAP_OTHER", "LIMU FUNC Z_SOME_FM"))
+	if _, err := client.copyToTransportOfCopies(context.Background(), &fakeBridge{}, "TR-SRC", TransportOfCopiesOptions{Target: "QAS"}); err != nil {
+		t.Fatalf("copyToTransportOfCopies: %v", err)
+	}
+	if len(ts.searches) != 0 {
+		t.Errorf("sent package lookups %v without a whitelist", ts.searches)
 	}
 }

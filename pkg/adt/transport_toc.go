@@ -138,6 +138,13 @@ func (c *Client) copyToTransportOfCopies(ctx context.Context, bridge functionBri
 		return nil, fmt.Errorf("%s holds no objects to copy", source)
 	}
 
+	// Every object the copy would carry must pass the package policy, before
+	// anything is created: a transport of copies is a way to put objects
+	// into another system, and --allowed-packages bounds which ones.
+	if err := c.checkTransportOfCopiesPackages(ctx, source, from); err != nil {
+		return nil, err
+	}
+
 	description := opts.Description
 	if description == "" {
 		description = transportOfCopiesDescription(details.Description)
@@ -215,6 +222,83 @@ func (c *Client) CheckTransportOfCopies(source string) error {
 		return err
 	}
 	return c.config.Safety.CheckTransport(strings.ToUpper(strings.TrimSpace(source)), op, false)
+}
+
+// checkTransportOfCopiesPackages checks the package of every object entry
+// the copy would carry against the package whitelist, and refuses the whole
+// copy, naming each object that is outside it or whose package cannot be
+// resolved. An R3TR entry is looked up as it is; a LIMU entry by the object
+// it is part of, which is refused when that cannot be told from the entry
+// (a function module's group, say). Entries that name no object (CORR) have
+// no package. Without a whitelist it does nothing and sends nothing.
+func (c *Client) checkTransportOfCopiesPackages(ctx context.Context, source string, from []copySource) error {
+	if len(c.config.Safety.AllowedPackages) == 0 {
+		return nil
+	}
+	type parent struct{ typ, name string }
+	verdict := map[parent]error{}
+	var refused []string
+	seen := map[string]bool{}
+	for _, src := range from {
+		for _, o := range src.Entries {
+			if !isObjectEntry(o) || seen[entryKey(o)] {
+				continue
+			}
+			seen[entryKey(o)] = true
+			typ, name, ok := packageObjectOf(o)
+			if !ok {
+				refused = append(refused, fmt.Sprintf("%s: cannot tell which object it is part of, so its package cannot be checked", entryName(o)))
+				continue
+			}
+			p := parent{typ, name}
+			err, done := verdict[p]
+			if !done {
+				err = c.CheckObjectPackageByName(ctx, typ, name)
+				verdict[p] = err
+			}
+			if err != nil {
+				refused = append(refused, fmt.Sprintf("%s: %v", entryName(o), err))
+			}
+		}
+	}
+	if len(refused) > 0 {
+		return fmt.Errorf("transport of copies of %s refused, nothing created: %d object(s) outside the allowed packages %v or not verifiable: %s",
+			source, len(refused), c.config.Safety.AllowedPackages, strings.Join(refused, "; "))
+	}
+	return nil
+}
+
+// packageObjectOf is the repository object whose package an entry belongs
+// to: an R3TR entry itself, a LIMU entry's class, interface or program.
+func packageObjectOf(o TransportObjectV2) (typ, name string, ok bool) {
+	typ = strings.ToUpper(strings.TrimSpace(o.Type))
+	name = strings.ToUpper(strings.TrimSpace(o.Name))
+	if strings.ToUpper(strings.TrimSpace(o.PgmID)) == "R3TR" {
+		return typ, name, name != ""
+	}
+	switch typ {
+	case "METH": // class name padded to 30, then the method
+		if f := strings.Fields(name); len(f) > 0 {
+			name = f[0]
+			if len(name) > 30 {
+				name = name[:30]
+			}
+			return "CLAS", name, true
+		}
+	case "CLSD", "CPUB", "CPRO", "CPRI":
+		return "CLAS", name, name != ""
+	case "CINC": // class name padded with '=' to 30, then the include suffix
+		if len(name) > 30 {
+			name = name[:30]
+		}
+		name = strings.TrimRight(name, "=")
+		return "CLAS", name, name != ""
+	case "INTD":
+		return "INTF", name, name != ""
+	case "REPS", "REPT", "REPO":
+		return "PROG", name, name != ""
+	}
+	return "", "", false
 }
 
 // copySource is one request or task whose object list TR_COPY_COMM copies,
