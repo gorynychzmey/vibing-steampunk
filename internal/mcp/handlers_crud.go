@@ -46,6 +46,16 @@ func (s *Server) routeCRUDAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleCloneObject, params)
 		case "SXCI":
 			return s.callHandler(ctx, s.handleCreateClassicBadi, withName(params, objectName))
+		case "ENHO":
+			return s.callHandler(ctx, s.handleCreateSourceCodePlugin, params)
+		case "BADI_IMPL":
+			return s.callHandler(ctx, s.handleCreateBadiImplementation, params)
+		case "DOMA":
+			return s.callHandler(ctx, s.handleCreateDomain, withName(params, objectName))
+		case "DTEL":
+			return s.callHandler(ctx, s.handleCreateDataElement, withName(params, objectName))
+		case "STRUCT", "APPEND":
+			return s.callHandler(ctx, s.handleCreateStructure, withName(params, objectName))
 		}
 	}
 
@@ -81,7 +91,9 @@ func (s *Server) handleLockObject(ctx context.Context, request mcp.CallToolReque
 		accessMode = am
 	}
 
-	result, err := s.adtClient.LockObject(ctx, objectURL, accessMode)
+	transport, _ := request.GetArguments()["transport"].(string)
+
+	result, err := s.adtClient.LockObject(ctx, objectURL, accessMode, transport)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to lock object: %v", err)), nil
 	}
@@ -151,7 +163,7 @@ func (s *Server) handleUpdateSource(ctx context.Context, request mcp.CallToolReq
 		}
 	}
 
-	err := s.withObjectLock(updateCtx, objectURL, lockHandle, func(handle string) error {
+	err := s.withObjectLock(updateCtx, objectURL, lockHandle, transport, func(handle string) error {
 		return s.adtClient.UpdateSource(updateCtx, sourceURL, source, handle, transport)
 	})
 	if err != nil {
@@ -251,6 +263,10 @@ func (s *Server) handleCreateObject(ctx context.Context, request mcp.CallToolReq
 		}
 		output, _ := json.MarshalIndent(fmResult, "", "  ")
 		return mcp.NewToolResultText(string(output)), nil
+	}
+
+	if opts.ObjectType == adt.ObjectTypeMessageClass {
+		return s.createMessageClass(ctx, opts, request.GetArguments())
 	}
 
 	err := s.adtClient.CreateObject(ctx, opts)
@@ -594,7 +610,7 @@ func (s *Server) handleDeleteObject(ctx context.Context, request mcp.CallToolReq
 		}
 	}
 
-	err := s.withObjectLockConsumed(objCtx, objectURL, lockHandle, func(handle string) error {
+	err := s.withObjectLockConsumed(objCtx, objectURL, lockHandle, transport, func(handle string) error {
 		return s.adtClient.DeleteObject(objCtx, objectURL, handle, transport)
 	})
 	if err != nil {
@@ -638,7 +654,7 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 	return newToolResultError(fmt.Sprintf("Move failed: %s", result.Message)), nil
 }
 
-// withName fills params["name"] from the target ("SXCI ZIMP") when the call
+// withName fills params["name"] from the target ("STRUCT ZDEMO") when the call
 // did not pass it.
 func withName(params map[string]any, objectName string) map[string]any {
 	if objectName == "" || getStringParam(params, "name") != "" {
