@@ -30,7 +30,7 @@ CLASS zcl_vsp_form_service DEFINITION
       c_sfpf TYPE trobjtype VALUE 'SFPF',
       c_sfpi TYPE trobjtype VALUE 'SFPI'.
 
-    " abapGit's FORM structure (ZCL_ABAPGIT_OBJECT_FORM), plus the text lines
+    " the FORM structure of abapGit's form serializer, plus the text lines
     " that abapGit keeps in a file of their own.
     TYPES:
       BEGIN OF ty_form_data,
