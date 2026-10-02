@@ -74,8 +74,9 @@ type Action struct {
 	// Op is the operation the core checks against the safety configuration
 	// before the handler runs. A Read action declares a read operation
 	// (adt.OpRead, OpSearch, OpQuery, OpFreeSQL, OpIntelligence); a Mutate or
-	// Execute action one that --read-only blocks (OpCreate, OpUpdate,
-	// OpDelete, OpActivate, OpWorkflow).
+	// Execute action one that changes the system (OpCreate, OpUpdate,
+	// OpDelete, OpActivate, OpWorkflow, or OpTransport, which the core also
+	// refuses without --enable-transports).
 	Op      adt.OperationType
 	Handler Handler
 }
@@ -116,6 +117,7 @@ var readOps = map[adt.OperationType]bool{
 
 var writeOps = map[adt.OperationType]bool{
 	adt.OpCreate: true, adt.OpUpdate: true, adt.OpDelete: true, adt.OpActivate: true, adt.OpWorkflow: true,
+	adt.OpTransport: true,
 }
 
 // Validate checks a set of extensions: each action complete and consistent,

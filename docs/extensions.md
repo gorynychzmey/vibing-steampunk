@@ -28,8 +28,9 @@ help text, and its actions. Each `mcpext.Action` declares
   `Type` is empty for an action without a target;
 - `Class` -- `Read`, `Mutate` or `Execute`, what it does to the system;
 - `Op` -- the operation the safety configuration is checked against: a read
-  operation for `Read`, one that `--read-only` blocks (`OpCreate`, `OpUpdate`,
-  `OpDelete`, `OpActivate`, `OpWorkflow`) for `Mutate` and `Execute`;
+  operation for `Read`, one that changes the system (`OpCreate`, `OpUpdate`,
+  `OpDelete`, `OpActivate`, `OpWorkflow`, or `OpTransport`, which also needs
+  `--enable-transports`) for `Mutate` and `Execute`;
 - `Handler` -- the code, called with the object name and the call's params.
 
 The handler gets an `mcpext.Env`: `ADT()` is the server's own ADT client,

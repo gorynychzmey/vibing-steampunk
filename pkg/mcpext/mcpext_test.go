@@ -31,6 +31,7 @@ func TestValidateAcceptsAConsistentSet(t *testing.T) {
 	b := ext{name: "forms", actions: []Action{
 		{Action: "read", Type: "SSFO", Class: Read, Op: adt.OpRead, Handler: handler},
 		{Action: "importtransport", Class: Execute, Op: adt.OpWorkflow, Handler: handler},
+		{Action: "import", Type: "TRANSPORT", Class: Mutate, Op: adt.OpTransport, Handler: handler},
 	}}
 	if err := Validate([]Extension{a, b}, func(string) bool { return false }); err != nil {
 		t.Fatal(err)

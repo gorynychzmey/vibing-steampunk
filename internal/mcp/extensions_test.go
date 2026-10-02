@@ -135,6 +135,37 @@ func TestExtensionDisallowedOpRefusedBeforeItsHandler(t *testing.T) {
 	}
 }
 
+// A transport action needs --enable-transports, as a built-in one does, and
+// --read-only refuses it like any other change.
+func TestExtensionTransportActionNeedsTransportsEnabled(t *testing.T) {
+	var calls atomic.Int32
+	ext := staticExtension{name: "transportext", actions: []mcpext.Action{{Action: "import", Type: "FAKETR",
+		Class: mcpext.Mutate, Op: adt.OpTransport,
+		Handler: func(context.Context, mcpext.Env, string, map[string]any) (*mcp.CallToolResult, error) {
+			calls.Add(1)
+			return mcp.NewToolResultText("imported"), nil
+		}}}}
+	sap := newFakeSAP(t)
+	for name, tc := range map[string]struct {
+		cfg  Config
+		runs bool
+	}{
+		"transports off":           {Config{}, false},
+		"transports on":            {Config{EnableTransports: true}, true},
+		"transports on, read-only": {Config{EnableTransports: true, ReadOnly: true}, false},
+		"transport ops disallowed": {Config{EnableTransports: true, DisallowedOps: "X"}, false},
+	} {
+		calls.Store(0)
+		cfg := tc.cfg
+		cfg.BaseURL, cfg.Username, cfg.Password, cfg.Client, cfg.Mode = sap.srv.URL, "u", "p", "001", "hyperfocused"
+		cfg.Extensions = []mcpext.Extension{ext}
+		res := callSAP(t, NewServer(&cfg), "import", "FAKETR X1")
+		if ran := calls.Load() == 1; ran != tc.runs || res.IsError == tc.runs {
+			t.Errorf("%s: %q (error %t), handler ran %t, want %t", name, resultText(res), res.IsError, ran, tc.runs)
+		}
+	}
+}
+
 func TestExtensionCannotShadowABuiltIn(t *testing.T) {
 	for name, a := range map[string]mcpext.Action{
 		"built-in type":   {Action: "read", Type: "CLAS", Class: mcpext.Read, Op: adt.OpRead},
