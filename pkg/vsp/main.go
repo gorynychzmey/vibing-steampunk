@@ -1004,6 +1004,9 @@ func Run(exts ...mcpext.Extension) {
 		os.Exit(1)
 	}
 	extensions = exts
+	// Set here, not in rootCmd's literal: that is evaluated when the package
+	// initialises, before cmd/vsp's main has handed over the build flags.
+	rootCmd.Version = fmt.Sprintf("%s (commit: %s, built: %s)", Version, Commit, BuildDate)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
