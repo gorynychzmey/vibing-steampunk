@@ -135,8 +135,6 @@ var builtinRouteLiterals = map[string]bool{
 	"import_status":               true,
 	"inactive_objects":            true,
 	"info":                        true,
-	"install_abapgit":             true,
-	"install_dummy_test":          true,
 	"install_zadt_vsp":            true,
 	"installed_components":        true,
 	"job":                         true,
