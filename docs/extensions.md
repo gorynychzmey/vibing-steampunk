@@ -46,7 +46,7 @@ See `pkg/mcpext/example_test.go` for a complete extension.
 | `ZADTVSP(ctx)` | the server's WebSocket to ZADT_VSP, for an extension with an ABAP service of its own |
 | `System()` | the connected system: `.vsp.json` name, URL, client, user, language, read-only |
 | `Setting(key)` | the extension's own setting for this system (below) |
-| `StartAsync(kind, fn)` | a background task, reported by `GET_ASYNC_RESULT` |
+| `StartAsync(kind, fn)` | a background task, reported by `GET_ASYNC_RESULT` (`wait_seconds` waits up to 30 minutes) |
 | `Logf(...)` | a diagnostic line under `--verbose` |
 
 A workflow that locks an object and writes under the lock runs the mutation

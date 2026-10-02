@@ -124,8 +124,11 @@ type Env interface {
 	// system, from .vsp.json: systems.<name>.extensions.<extension>.<key>.
 	Setting(key string) (value any, ok bool)
 	// StartAsync runs fn in the background and returns a task id that
-	// SAP(action="debug", target="GET_ASYNC_RESULT") reports on. It is not
-	// available to a command line, which ends with the command.
+	// SAP(action="debug", target="GET_ASYNC_RESULT") reports on, waiting up
+	// to "wait_seconds" (at most 30 minutes) for it to end. A task that fails
+	// keeps the result fn returned with its error. fn runs on a context of
+	// its own, not the call's; bound it yourself. StartAsync is not available
+	// to a command line, which ends with the command.
 	StartAsync(kind string, fn func(ctx context.Context) (any, error)) (taskID string, err error)
 	// Logf writes a diagnostic line when the binary runs with --verbose.
 	Logf(format string, args ...any)

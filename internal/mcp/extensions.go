@@ -187,11 +187,14 @@ func (s *Server) startAsyncTask(kind string, fn func(ctx context.Context) (any, 
 		defer s.asyncTasksMu.Unlock()
 		now := time.Now()
 		task.EndedAt = &now
+		// A failed task keeps what it returned besides the error: an import
+		// that TMS refused still reports the steps tp ran.
+		task.Result = result
 		if err != nil {
 			task.Status, task.Error = "error", err.Error()
 			return
 		}
-		task.Status, task.Result = "completed", result
+		task.Status = "completed"
 	}()
 	return id
 }

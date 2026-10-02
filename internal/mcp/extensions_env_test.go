@@ -116,6 +116,32 @@ func TestExtensionAsyncTaskIsReportedByGetAsyncResult(t *testing.T) {
 	if !strings.Contains(failed, "error") || !strings.Contains(failed, "boom") {
 		t.Errorf("a panicking task: %s", failed)
 	}
+
+	// A failed task keeps the result it returned with its error.
+	partial, _ := probe.env.StartAsync("probe_job", func(context.Context) (any, error) {
+		return map[string]string{"steps": "tp rc 8"}, errors.New("import failed")
+	})
+	got := resultText(mustCall(t, s.handleGetAsyncResult, map[string]any{"task_id": partial, "wait_seconds": float64(5)}))
+	if !strings.Contains(got, "import failed") || !strings.Contains(got, "tp rc 8") {
+		t.Errorf("a failed task with a result: %s", got)
+	}
+}
+
+// A wait that ends before the task is an answer, not an error: the task, still
+// running.
+func TestGetAsyncResultWaitEndsWithTheRunningTask(t *testing.T) {
+	probe := newEnvProbe()
+	s := newExtensionServer(t, false, probe)
+	if err := s.StartExtensions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	id, _ := probe.env.StartAsync("probe_job", func(context.Context) (any, error) { <-release; return nil, nil })
+	res := mustCall(t, s.handleGetAsyncResult, map[string]any{"task_id": id, "wait_seconds": float64(1)})
+	if res.IsError || !strings.Contains(resultText(res), "running") {
+		t.Errorf("after the wait: %q (error %t)", resultText(res), res.IsError)
+	}
 }
 
 func TestExtensionVersionInInfo(t *testing.T) {
