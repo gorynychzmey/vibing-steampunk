@@ -5,7 +5,8 @@
 # the manual fallback (`make release-dist TAG=vX.Y.Z`), so a dry run on a laptop
 # runs the same checks CI runs.
 #
-#   release.sh build   TAG [DIST]          nine binaries + checksums.txt + LICENSE + NOTICE
+#   release.sh on-branch TAG               the tag is on origin/main, or on origin/release/X.Y of its own X.Y (LTS)
+#   release.sh build   TAG [DIST]       one binary per PLATFORMS entry + checksums.txt + LICENSE + NOTICE
 #   release.sh verify  TAG [DIST]          by content: names, headers, build info, checksums
 #   release.sh run     TAG DIST SPEC...    execute binaries; each must print exactly TAG
 #   release.sh notes   TAG [OUT]           release notes: README "What's New", else git-cliff
@@ -24,10 +25,14 @@
 # associative arrays, no mapfile, no GNU-only flags.
 set -euo pipefail
 
-# The nine assets every release has shipped since v2.4x. `vsp update` downloads
+# The six assets every release ships since v2.60.0 (linux/386, linux/arm and
+# windows/386 were dropped then). `vsp update` downloads
 # assetName(GOOS, GOARCH) = vsp-<os>-<arch>[.exe] (cmd/vsp/update.go) and refuses
-# one without a checksums.txt entry, so these names are an interface.
-PLATFORMS="linux/amd64 linux/arm64 linux/386 linux/arm darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 windows/386"
+# one without a checksums.txt entry, so these names are an interface. Every
+# count below is derived from this list; there is no second copy of the number.
+PLATFORMS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
+# shellcheck disable=SC2086 # split on purpose: one platform per word
+NPLATFORMS=$(set -- $PLATFORMS; echo $#)
 EXTRA_FILES="LICENSE NOTICE" # Apache-2.0 s.4 (open-rfc-go is embedded); the binaries are bare
 TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
 
@@ -56,6 +61,44 @@ check_tag() {
 }
 
 tag_commit() { git rev-parse --verify --quiet "refs/tags/$1^{commit}" || die "tag $1 does not exist locally"; }
+
+# ------------------------------------------------------------------ on-branch
+# Where a tag may come from. A release is cut from main, or, for an LTS line,
+# from release/X.Y: v2.59.2 is cherry-picked onto release/2.59 and tagged there.
+# Accepted when the tag's commit is reachable from origin/main, or from exactly
+# one origin/release/X.Y branch and that branch's X.Y is the tag's major.minor.
+# So v2.60.9 on release/2.59 is refused, and so is v2.59.2 on any other branch.
+# It reads origin's branches as already fetched (refs/remotes/origin/*) and
+# fetches nothing itself: the caller fetches main and release/*.
+cmd_on_branch() {
+	local tag=$1 sha xy b branches checked hits=
+	check_tag "$tag"
+	sha=$(tag_commit "$tag")
+	git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null ||
+		die "origin/main is not fetched: git fetch origin '+refs/heads/main:refs/remotes/origin/main'"
+	if git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+		ok "$tag ($sha) is on origin/main"; return
+	fi
+	xy=$(echo "$tag" | sed -E 's/^v([0-9]+\.[0-9]+)\..*$/\1/')
+	branches=$(git for-each-ref --format='%(refname:lstrip=3)' refs/remotes/origin/release |
+		grep -E '^release/[0-9]+\.[0-9]+$' || true)
+	checked="origin/main"
+	for b in $branches; do
+		checked="$checked origin/$b"
+		if git merge-base --is-ancestor "$sha" "refs/remotes/origin/$b"; then hits="$hits $b"; fi
+	done
+	hits=${hits# }
+	case $hits in
+	"release/$xy")
+		ok "$tag ($sha) is on origin/release/$xy (LTS)" ;;
+	"")
+		die "$tag ($sha) is on none of the branches a release comes from (checked: $checked). Tag main, or tag an LTS patch on release/$xy." ;;
+	*" "*)
+		die "$tag ($sha) is on more than one release branch ($hits; checked: $checked). An LTS tag must be on exactly one: release/$xy." ;;
+	*)
+		die "$tag ($sha) is on origin/$hits, not on origin/main (checked: $checked). A v$xy.x tag belongs on main or on release/$xy, never on $hits." ;;
+	esac
+}
 
 # ---------------------------------------------------------------------- build
 cmd_build() {
@@ -88,13 +131,11 @@ cmd_build() {
 		os=${p%/*}; arch=${p#*/}
 		out="$dist/$(asset_of "$p")"
 		echo "build $out"
-		# GOARM pinned: the default for a cross-compile has changed across Go
-		# releases, and vsp-linux-arm has always meant ARMv7. CGO_ENABLED=0
-		# pinned: a native build otherwise links glibc (v2.57.0-v2.59.0's
+		# CGO_ENABLED=0 pinned: a native build otherwise links glibc (v2.57.0-v2.59.0's
 		# linux-amd64 needs glibc 2.34). No -trimpath: it drops -ldflags from
 		# the build info, and verify reads main.Version from there for the
 		# binaries no runner can start.
-		CGO_ENABLED=0 GOOS=$os GOARCH=$arch GOARM=7 \
+		CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
 			go build -ldflags "$ldflags" -o "$out" ./cmd/vsp
 	done
 	(cd "$dist" && for p in $PLATFORMS; do a=$(asset_of "$p"); echo "$(sha256_of "$a")  $a"; done) > "$dist/checksums.txt"
@@ -113,8 +154,7 @@ expect_header() { # file os arch -> 0 if the executable header is that platform
 		case $arch in
 		amd64) [ "$cls$mach" = 023e00 ] ;;
 		arm64) [ "$cls$mach" = 02b700 ] ;;
-		386) [ "$cls$mach" = 010300 ] ;;
-		arm) [ "$cls$mach" = 012800 ] ;;
+		*) false ;; # an architecture without a header rule is never a pass
 		esac || { echo "ELF class $cls machine $mach is not $arch"; return 1; } ;;
 	darwin)
 		magic=$(hexbytes "$f" 0 4); mach=$(hexbytes "$f" 4 4)
@@ -122,6 +162,7 @@ expect_header() { # file os arch -> 0 if the executable header is that platform
 		case $arch in
 		amd64) [ "$mach" = 07000001 ] ;;
 		arm64) [ "$mach" = 0c000001 ] ;;
+		*) false ;; # an architecture without a header rule is never a pass
 		esac || { echo "Mach-O cputype $mach is not $arch"; return 1; } ;;
 	windows)
 		[ "$(hexbytes "$f" 0 2)" = 4d5a ] || { echo "no MZ header"; return 1; }
@@ -132,8 +173,9 @@ expect_header() { # file os arch -> 0 if the executable header is that platform
 		case $arch in
 		amd64) [ "$mach" = 6486 ] ;;
 		arm64) [ "$mach" = 64aa ] ;;
-		386) [ "$mach" = 4c01 ] ;;
+		*) false ;; # an architecture without a header rule is never a pass
 		esac || { echo "PE machine $mach is not $arch"; return 1; } ;;
+	*) echo "no header rule for $os"; return 1 ;;
 	esac
 }
 
@@ -157,7 +199,7 @@ cmd_verify() {
 	want=$(for p in $PLATFORMS; do asset_of "$p"; done; echo checksums.txt; for f in $EXTRA_FILES; do echo "$f"; done)
 	want=$(echo "$want" | LC_ALL=C sort)
 	got=$(cd "$dist" && ls -1A | LC_ALL=C sort)
-	if [ "$want" = "$got" ]; then ok "file set: 9 binaries, checksums.txt, $EXTRA_FILES"
+	if [ "$want" = "$got" ]; then ok "file set: $NPLATFORMS binaries, checksums.txt, $EXTRA_FILES"
 	else bad "file set differs from the expected one:"; diff <(echo "$want") <(echo "$got") >&2 || true; fi
 
 	# 2. Per binary: the header is the platform the name claims, and Go's own
@@ -169,7 +211,6 @@ cmd_verify() {
 		if why=$(expect_header "$f" "$os" "$arch"); then ok "$a header is $os/$arch"; else bad "$a header: $why"; fi
 		[ "$(buildinfo "$f" GOOS)" = "$os" ] || bad "$a build info GOOS=$(buildinfo "$f" GOOS)"
 		[ "$(buildinfo "$f" GOARCH)" = "$arch" ] || bad "$a build info GOARCH=$(buildinfo "$f" GOARCH)"
-		if [ "$arch" = arm ]; then [ "$(buildinfo "$f" GOARM)" = 7 ] || bad "$a GOARM=$(buildinfo "$f" GOARM), want 7"; fi
 		[ "$(buildinfo "$f" CGO_ENABLED)" = 0 ] || bad "$a CGO_ENABLED=$(buildinfo "$f" CGO_ENABLED)"
 		v=$(buildinfo "$f" vcs.revision)
 		[ "$v" = "$sha" ] || bad "$a was built from ${v:-an unknown revision}, not $tag ($sha)"
@@ -185,7 +226,7 @@ cmd_verify() {
 	local sums="$dist/checksums.txt" n line hex name
 	if [ -f "$sums" ]; then
 		n=$(grep -c . "$sums" || true)
-		[ "$n" = 9 ] || bad "checksums.txt has $n lines, want 9"
+		[ "$n" = "$NPLATFORMS" ] || bad "checksums.txt has $n lines, want $NPLATFORMS"
 		for p in $PLATFORMS; do
 			a=$(asset_of "$p")
 			line=$(grep -E "^[0-9a-f]{64}  \*?$a\$" "$sums" || true)
@@ -198,7 +239,7 @@ cmd_verify() {
 			case " $(for p in $PLATFORMS; do asset_of "$p"; done | tr '\n' ' ') " in
 			*" $name "*) ;; *) bad "checksums.txt names an unexpected file: $name" ;; esac
 		done < "$sums"
-		[ "$fail" = 0 ] && ok "checksums.txt: 9 entries, all match"
+		[ "$fail" = 0 ] && ok "checksums.txt: $NPLATFORMS entries, all match"
 	else
 		bad "checksums.txt missing"
 	fi
@@ -293,15 +334,12 @@ cmd_notes() {
 		echo "|----------|--------------|------|"
 		echo "| Linux | x64 | vsp-linux-amd64 |"
 		echo "| Linux | ARM64 | vsp-linux-arm64 |"
-		echo "| Linux | x86 | vsp-linux-386 |"
-		echo "| Linux | ARMv7 | vsp-linux-arm |"
 		echo "| macOS | x64 | vsp-darwin-amd64 |"
 		echo "| macOS | Apple Silicon | vsp-darwin-arm64 |"
 		echo "| Windows | x64 | vsp-windows-amd64.exe |"
 		echo "| Windows | ARM64 | vsp-windows-arm64.exe |"
-		echo "| Windows | x86 | vsp-windows-386.exe |"
 		echo
-		echo "Checksums: \`checksums.txt\`. Or run \`vsp update\` from an older version."
+		echo "Checksums: \`checksums.txt\`. Or run \`vsp update\` from an older version on one of these platforms; elsewhere: \`go install github.com/oisee/vibing-steampunk/cmd/vsp@latest\`."
 		echo "\`LICENSE\` and \`NOTICE\` travel with the binaries (Apache-2.0 components are embedded)."
 		echo
 		echo "**Changelog:** https://github.com/$repo/blob/$tag/CHANGELOG.md"
@@ -377,6 +415,10 @@ cmd_publish() {
 	local tag=$1 sha=$2 dist=$3 repo=${GITHUB_REPOSITORY:-oisee/vibing-steampunk} latest
 	"$0" tag-at "$tag" "$sha"
 	"$0" digests "$tag" "$dist"
+	# Read the published set as late as possible: release.yml serializes its
+	# publish jobs across all tags (concurrency group release-publish), so a
+	# v2.60.0 published a moment ago is already listed here, and an LTS v2.59.2
+	# publishing after it gets latest=false.
 	latest=$("$0" latest "$tag")
 	gh release edit "$tag" --repo "$repo" --draft=false --latest="$latest"
 	if ! { "$0" tag-at "$tag" "$sha" && "$0" digests "$tag" "$dist"; }; then
@@ -387,9 +429,10 @@ cmd_publish() {
 		--jq '"\(.url) draft=\(.isDraft) prerelease=\(.isPrerelease) assets=\(.assets | length) latest='"$latest"'"'
 }
 
-[ $# -ge 1 ] || die "usage: release.sh build|verify|run|notes|compare|tag-at|digests|latest|publish ..."
+[ $# -ge 1 ] || die "usage: release.sh on-branch|build|verify|run|notes|compare|tag-at|digests|latest|publish ..."
 sub=$1; shift
 case $sub in
+on-branch) [ $# -eq 1 ] || die "usage: release.sh on-branch TAG"; cmd_on_branch "$@" ;;
 build) [ $# -ge 1 ] || die "usage: release.sh build TAG [DIST]"; cmd_build "$@" ;;
 verify) [ $# -ge 1 ] || die "usage: release.sh verify TAG [DIST]"; cmd_verify "$@" ;;
 run) [ $# -ge 3 ] || die "usage: release.sh run TAG DIST SPEC..."; cmd_run "$@" ;;

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/oisee/vibing-steampunk/pkg/cache"
 	"os"
@@ -74,6 +75,11 @@ type systemParams struct {
 
 	Cache     bool
 	CachePath string
+
+	// Expect pins the identity (SID[.CLIENT][/USER]); ExpectSource says where
+	// the pin came from. Empty: no pin, and no preflight request.
+	Expect       string
+	ExpectSource string
 }
 
 // resolveSystemParams resolves system parameters from --system flag or env vars.
@@ -127,6 +133,10 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 		if err != nil {
 			return nil, err
 		}
+		expect, expectSource := cliExpect(sys.Expect)
+		if expectSource == ".vsp.json" {
+			expectSource = fmt.Sprintf(".vsp.json system %q", effectiveName)
+		}
 
 		return &systemParams{
 			Name:               effectiveName,
@@ -154,6 +164,8 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 			BlockFreeSQL:            sys.BlockFreeSQL || envFlag("SAP_BLOCK_FREE_SQL"),
 			Cache:                   sys.Cache,
 			CachePath:               sys.CachePath,
+			Expect:                  expect,
+			ExpectSource:            expectSource,
 		}, nil
 	}
 
@@ -179,6 +191,7 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 	if err != nil {
 		return nil, err
 	}
+	envExpect, envExpectSource := cliExpect("")
 
 	return &systemParams{
 		URL:                url,
@@ -203,6 +216,8 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 		BlockFreeSQL:            envFlag("SAP_BLOCK_FREE_SQL"),
 		Cache:                   cacheEnabled,
 		CachePath:               cachePath,
+		Expect:                  envExpect,
+		ExpectSource:            envExpectSource,
 	}, nil
 }
 
@@ -311,6 +326,21 @@ func buildClient(params *systemParams) (*adt.Client, error) {
 	opts := []adt.Option{
 		adt.WithClient(params.Client),
 		adt.WithLanguage(params.Language),
+	}
+
+	// The identity pin. The user a password logon would send is checked here,
+	// so a wrong one is refused before it ever reaches SAP; a cookie or single
+	// sign-on session has no user name until the system says it.
+	basicUser := params.User
+	if params.UsesSSO() || params.CookieFile != "" || params.CookieString != "" {
+		basicUser = ""
+	}
+	pinOpt, err := cliPinOption(params, basicUser)
+	if err != nil {
+		return nil, err
+	}
+	if pinOpt != nil {
+		opts = append(opts, pinOpt)
 	}
 
 	// Carry the system's declared safety into the client. Without this a
@@ -442,6 +472,10 @@ func getWSClient(ctx context.Context, params *systemParams) (*adt.AMDPWebSocketC
 	noCache.Cache, noCache.CachePath = false, ""
 	client, err := buildClient(&noCache)
 	if err != nil {
+		return nil, err
+	}
+	// The WebSocket logs on by itself; the pin is checked over ADT first.
+	if err := client.VerifyIdentity(ctx); err != nil {
 		return nil, err
 	}
 	wsClient := client.NewAMDPWebSocketClient()
@@ -639,9 +673,18 @@ Examples:
 }
 
 func init() {
-	sourceCmd.Flags().String("parent", "", "Function group name (required for FUNC type)")
-	sourceCmd.Flags().String("include", "", "Class include type: definitions, implementations, macros, testclasses (CLAS only)")
-	sourceCmd.Flags().String("method", "", "Method name to retrieve only that METHOD...ENDMETHOD block (CLAS only)")
+	addSourceReadFlags(sourceCmd)
+}
+
+// addSourceReadFlags gives a command that runs runSource the flags it reads.
+func addSourceReadFlags(cmds ...*cobra.Command) {
+	for _, c := range cmds {
+		c.Flags().String("parent", "", "Function group name (required for FUNC type)")
+		c.Flags().String("include", "", "Class include type: definitions, implementations, macros, testclasses (CLAS only)")
+		c.Flags().String("method", "", "Method name to retrieve only that METHOD...ENDMETHOD block (CLAS only)")
+		c.Flags().Bool("summary", false, "Print JSON metadata instead of the source: lines, bytes, sha256 (exact text, not normalised), sourceHash, uri")
+		c.Flags().String("if-none-match", "", "sha256 from an earlier --summary: if the source still has it, print \"unchanged: source sha256 ...\" instead of the source")
+	}
 }
 
 func runSource(cmd *cobra.Command, args []string) error {
@@ -661,6 +704,14 @@ func runSource(cmd *cobra.Command, args []string) error {
 	include, _ := cmd.Flags().GetString("include")
 	method, _ := cmd.Flags().GetString("method")
 
+	summary, _ := cmd.Flags().GetBool("summary")
+	ifNoneMatch, _ := cmd.Flags().GetString("if-none-match")
+	if strings.TrimSpace(ifNoneMatch) != "" {
+		if ifNoneMatch, err = adt.ParseIfNoneMatch(ifNoneMatch); err != nil {
+			return err
+		}
+	}
+
 	opts := &adt.GetSourceOptions{
 		Parent:  parent,
 		Include: include,
@@ -668,13 +719,35 @@ func runSource(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	source, err := client.GetSource(ctx, objType, name, opts)
+	if summary || ifNoneMatch != "" {
+		// Never from the response cache: see adt.WithFreshReads.
+		ctx = adt.WithFreshReads(ctx)
+	}
+	source, readURI, err := client.GetSourceWithURI(ctx, objType, name, opts)
 	if err != nil {
 		return fmt.Errorf("failed to get source: %w", err)
 	}
 
-	fmt.Print(source)
-	return nil
+	out := cmd.OutOrStdout()
+	if summary || ifNoneMatch != "" {
+		sum := adt.SummarizeSource(objType, name, opts, readURI, source)
+		unchanged := ifNoneMatch != "" && ifNoneMatch == sum.SHA256
+		if summary {
+			if ifNoneMatch != "" {
+				sum.Unchanged = &unchanged
+			}
+			data, _ := json.MarshalIndent(sum, "", "  ")
+			_, err := fmt.Fprintln(out, string(data))
+			return err
+		}
+		if unchanged {
+			_, err := fmt.Fprintln(out, adt.SourceUnchangedText(sum, false))
+			return err
+		}
+	}
+
+	_, err = fmt.Fprint(out, source)
+	return err
 }
 
 // --- systems command ---

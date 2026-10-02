@@ -172,6 +172,58 @@ ends with a stack read, every catch was thrown away. It serves the same document
 from the dispatcher instead. The shape is discovered once per session and
 remembered.
 
+### Debug from your editor (DAP)
+
+`vsp dap` is a Debug Adapter Protocol server on stdin/stdout. VS Code, nvim-dap,
+JetBrains and other DAP clients can use it to set breakpoints in ABAP and step
+through it on a real system. It is the same debugger as `vsp adt debug`: SAP's
+own `/sap/bc/adt/debugger*` resources on one held stateful session, with nothing
+installed on the server.
+
+- **Logon:** vsp's usual config (a `.vsp.json` system, or `SAP_*` env). The launch
+  configuration names a system and a user, never a password.
+- **What it does:** it arms your breakpoints and waits. Run the program in SAP
+  (SE38, a unit test, an RFC call, a job) and the editor stops on the line. vsp
+  never starts the program itself, and it is not an MCP tool.
+- **Breakpoints:** set them in files named by vsp's export convention
+  (`zcl_x.clas.abap`, `zrep.prog.abap`, `zgrp.fugr.z_fm.abap`, ...). Stack frames
+  open the local file when it is under `sourceRoot`. Otherwise the source is read
+  from SAP.
+- **Read-only systems:** you can still debug, but you can't change variables.
+
+VS Code: until the vsp extension ships, any extension can declare the adapter in
+its `package.json`. The `launch.json` entry then uses that type:
+
+```jsonc
+// package.json of a local extension
+"contributes": {
+  "breakpoints": [{ "language": "abap" }],
+  "debuggers": [{ "type": "abap-sap", "label": "ABAP (vsp)", "program": "vsp", "args": ["dap"] }]
+}
+
+// .vscode/launch.json
+{ "type": "abap-sap", "request": "attach", "name": "ABAP on A4H",
+  "system": "a4h", "object": "ZVSP_DEBUG_DEMO", "sourceRoot": "${workspaceFolder}" }
+```
+
+nvim-dap:
+
+```lua
+local dap = require('dap')
+dap.adapters.vsp = { type = 'executable', command = 'vsp', args = { 'dap' } }
+dap.configurations.abap = {
+  { type = 'vsp', request = 'attach', name = 'ABAP on A4H',
+    system = 'a4h', object = 'ZVSP_DEBUG_DEMO', sourceRoot = '${workspaceFolder}' },
+}
+```
+
+Launch and attach take the same arguments: `system`, `user` (whose debuggees to
+catch; the default is the logon user), `object` and `include` (optional, resolved
+at start), `sourceRoot`, `systemDebugging` and `listenSeconds`. Supported
+requests: breakpoints, continue, step over/in/out, the stack, and variables
+(locals, globals, and structures and tables expanded in place). Changing a
+variable is also supported.
+
 ### AMDP debugging over plain ADT — the breakpoint fires
 
 An AMDP method runs inside HANA, not inside ABAP, so debugging one means
@@ -1052,11 +1104,55 @@ Earlier: **[Still Only 5%](articles/2026-08-25-still-five-percent.md)** · **[VS
 
 ## What's New
 
-The headline changes are in the **"New in the last three releases"** callout at the top of this README; the full version history is in [CHANGELOG.md](CHANGELOG.md). Latest release: **[v2.59.1 — built by CI](https://github.com/oisee/vibing-steampunk/releases/tag/v2.59.1)**.
+The headline changes are in the **"New in the last three releases"** callout at the top of this README; the full version history is in [CHANGELOG.md](CHANGELOG.md). Latest release: **[v2.60.0 — debug, pin, summarise](https://github.com/oisee/vibing-steampunk/releases/tag/v2.60.0)**.
 
-### v2.60.0 — upcoming
+### v2.60.0 — new since v2.59.1
+
+Debug from your editor, pin where vsp may work, read less to know more.
+v2.59.x continues as an LTS line on `release/2.59` (fixes only).
+
+**New:** `vsp dap`, a Debug Adapter Protocol server. It lets you debug ABAP from VS Code, nvim-dap or JetBrains on a real system, with no Z code. See [Debug from your editor (DAP)](#debug-from-your-editor-dap).
+
+**New:** read summary. `SAP(action="read", ..., params={"summary": true})`
+(`vsp source read ... --summary`) returns the lines, bytes and `sha256` of
+the source instead of the source. `params={"if_none_match": "<sha256>"}`
+(`--if-none-match`) answers "unchanged: source sha256 …" while the source
+still has that digest. Only the object's own source is compared, not the
+dependency context. A read with `include_hash` now carries the same `sha256`. The digest is over the exact text, not normalised. See
+[Read Summary](#read-summary--is-this-the-version-i-already-have).
+
+**Fixed:**
+
+- **`vsp dap` releases everything it took.** Every exit path (disconnect,
+  end of stream, a signal, a failed step or attach) clears the breakpoints,
+  releases the debuggee and stops the listener. A disconnect during a listen
+  no longer waits behind it: measured on a real system, 58 s → 0.1 s (#346).
+- **A failed BADI_IMPL leaves no empty ENHO** (#349, ported from #336). The
+  shared cleanup after a failed create now also releases the lock it took,
+  and a container whose transport request can't be established is kept, with
+  the manual step named, rather than deleted past `--allowed-transports`.
+- **The leak scan can't be blinded.** Control bytes in a commit message, a
+  file name or a foreign message encoding no longer hide a value from it, and
+  it never prints a scanned path or value in its own log (#347).
 
 **Moved out:** the ABAP transpilers (`vsp compile`) now live in [ABAPiti](https://github.com/oisee/abapiti).
+
+**New:** `--expect SID[.CLIENT][/USER]` (or `SAP_EXPECT`, or `"expect"` on a
+`.vsp.json` system) pins where vsp may work, e.g. `--expect A4H.001/DEVELOPER`.
+A configured user that differs is refused at startup, before any logon. On
+the first request, vsp asks the system for its SID, client and user and
+refuses everything when they differ. `SAP()` shows `pinned: A4H.001/DEVELOPER ✓`.
+Without a pin, nothing changes and no extra request is sent. The server's
+startup log and `vsp config show` now say where the logon came from.
+
+**Platforms:** six binaries: linux-amd64, linux-arm64, darwin-amd64,
+darwin-arm64, windows-amd64 and windows-arm64. `vsp-linux-386`,
+`vsp-linux-arm` and `vsp-windows-386` are no longer built. On those platforms,
+install from source instead:
+`go install github.com/oisee/vibing-steampunk/cmd/vsp@latest`
+(`vsp update` from v2.59.x only reports that the release has no asset for
+the platform and leaves the installed binary alone; from v2.60.0 on it says
+why and gives this command).
 
 ### v2.59.1 — new since v2.59.0
 
@@ -1345,6 +1441,34 @@ The AI only sends/receives the method block (~30 lines). vsp fetches the full cl
 
 > *Built-in ABAP parser based on [abaplint](https://github.com/abaplint/abaplint) by [Lars Hvam](https://github.com/larshp) — the same parser that powers abaplint's 392 ABAP statement types.*
 
+### Read Summary — Is This the Version I Already Have?
+
+A read can return what the source *is* instead of the source itself:
+
+```
+SAP(action="read", target="CLAS ZCL_CALCULATOR", params={"summary": true})
+→ {"objectType": "CLAS", "name": "ZCL_CALCULATOR",
+   "uri": "/sap/bc/adt/oo/classes/ZCL_CALCULATOR/source/main",
+   "lines": 412, "bytes": 15873, "sha256": "3f0a…", "sourceHash": "sha256:9c1e…"}
+
+# Later: only pay for the body if it changed
+SAP(action="read", target="CLAS ZCL_CALCULATOR", params={"if_none_match": "3f0a…"})
+→ unchanged: source sha256 3f0a… (CLAS ZCL_CALCULATOR, 412 lines, 15873 bytes); the source was not returned; dependency context not compared: read without if_none_match to refresh it
+```
+
+- **`sha256`** is the lower-case hex SHA-256 of the exact text a read returns, **not normalised**: CRLF stays CRLF and a final newline stays. `sha256sum` over the text you received gives the same value.
+- **`sourceHash`** is the normalised hash (CRLF→LF, trailing newlines dropped) for `expected_source_hash` on a guarded write. It is left out where WriteSource refuses one (a method-level read, a FUNC, types it does not write as source); `sourceHashNote` then says why.
+- **`uri`** is the ADT source that actually served the text. When that is not the one asked for, `requested` names the original: a PROG that ADT knows only as an include is read from `/programs/includes`, and an ENHO names whichever of its endpoints answered.
+- **Never from the response cache.** With `VSP_CACHE=true` (or `cache: true` for a system), a plain read can be answered from the cache for up to its TTL. `summary` and `if_none_match` always read SAP, so "unchanged" means unchanged now, not unchanged since the cache entry was made. The fresh answer refreshes the cache entry.
+- **`if_none_match` compares the object's own source only.** The dependency context a default read appends is not compared, so a changed dependency still answers "unchanged", and the answer says so. Read without `if_none_match` to refresh the context. Pulling the context into the comparison would cost a round trip per dependency, which defeats the point.
+- Neither equals `git_delete_objects`' `expect` sha256: that one is computed on SAP over the object's whole abapGit serialisation (one `<file>=<sha256>` line per file, XML included), so it is never a single source's digest.
+- Both are the same single read as a normal one: no extra SAP round trip, and no dependency context (which costs one per dependency).
+- With `if_none_match` and a different digest you get the normal read, body and all. `summary` and `if_none_match` together report `"unchanged": true|false`.
+- `version` and last-changed author/date are not reported: a plain source GET does not say which version it served nor who changed it, and finding out would cost another round trip.
+- CLI: `vsp source read CLAS ZCL_CALCULATOR --summary`, `--if-none-match <sha256>`.
+
+> **Token-saving tip:** make the first full read with `params={"include_hash": true, "include_context": false}`: it returns the source together with its `sha256`. Keep that digest, and before re-reading the object ask with `if_none_match`: an unchanged 400-line class then costs one line instead of thousands of tokens.
+
 ### Native Go ABAP Lexer — abaplint in Go
 
 The [abaplint](https://github.com/abaplint/abaplint) lexer has been mechanically ported from TypeScript to native Go (`pkg/abaplint`). This is the same lexer that powers abaplint — 48 token types, all 6 lexer modes (normal, string, backtick, template, comment, pragma), with full whitespace-context encoding.
@@ -1415,6 +1539,7 @@ vsp rfc describe BAPI_USER_GET_DETAIL            # FM interface as JSON Schema
 # Debugging and tracing (nothing installed on the server)
 vsp rfc debug                                    # debug REPL on a pinned RFC session
 vsp adt debug                                    # the same REPL over stateful HTTPS
+vsp dap                                          # the debugger for editors (Debug Adapter Protocol)
 vsp trace run ZFOO --call                        # SAT trace: the measured call tree
 vsp trace unit ZFOO --line 12 --values           # record a unit, statement by statement
 
@@ -1579,6 +1704,8 @@ vsp works in two modes:
 # Source operations
 vsp -s a4h source CLAS ZCL_MY_CLASS              # read source
 vsp -s a4h source read CLAS ZCL_MY_CLASS          # same, explicit
+vsp -s a4h source read CLAS ZCL_MY_CLASS --summary              # lines, bytes, sha256 — no body
+vsp -s a4h source read CLAS ZCL_MY_CLASS --if-none-match <sha>  # "unchanged" or the source
 vsp -s a4h source write CLAS ZCL_FOO < file.abap  # write from stdin
 vsp -s a4h source edit CLAS ZCL_FOO --old "X" --new "Y"  # surgical edit
 vsp -s a4h source context CLAS ZCL_FOO            # source + dependency contracts
@@ -1834,6 +1961,51 @@ vsp -v slim '$ZDEMO'      # 0.01 s — [cache] 28 hits, 0 misses
 Something changed on the system by someone else within the TTL is the one
 case the cache cannot see; delete the file, or wait it out.
 
+### Pin the system, client and user (`--expect`)
+
+```bash
+vsp --expect A4H.001/DEVELOPER          # SID.CLIENT/USER
+export SAP_EXPECT=A4H.001               # or SID.CLIENT, or just SID
+```
+
+In `.vsp.json`, put it on a system: `"expect": "A4H.001/DEVELOPER"`.
+
+A pin turns a connection that lands in the wrong place into a clear refusal:
+
+- **Before any logon**, the configured user and client are compared with the
+  pin. A different user (for example, a stale `SAP_USER` in the shell) is
+  refused at startup, so its password never reaches SAP and never counts
+  toward a lock.
+- **On the first request**, vsp asks the system for its SID, client and user
+  (`/sap/bc/adt/core/http/systeminformation`; on older releases T000 and the
+  transport organizer). If they differ, vsp refuses that request and every
+  later one: `connected to B4H.001 as DEVELOPER, expected A4H.001/DEVELOPER`.
+  A cookie or SSO session's user is known only then, so it is checked then.
+- **If SAP refuses the password** during that check (401), vsp does not
+  retry, then or on any later request: one wrong password costs one failed
+  logon.
+- **After a re-authentication** (SSO refresh, reloaded cookie file), the new
+  session is checked again before the work that triggered it is retried.
+- **Classic RFC and the ZADT_VSP WebSocket** follow the same pin. An RFC user
+  that contradicts it (`rfc_user`, `--rfc-user` or a per-call `user`) never
+  dials the gateway. After RFC logon, `RFC_SYSTEM_INFO` must report the pinned
+  SID before any other call. A WebSocket opens only once the pin is confirmed,
+  and with the session that was verified. Under a pin, a 401 on the WebSocket
+  upgrade is not retried with the password.
+
+**Threat model:** the pin guards against misconfiguration: the wrong system,
+client or user from flags, the environment or `.vsp.json`, or a
+re-authentication that switches identity. It does not defend against a hostile
+SAP server. Cookies the verified server issues itself are covered by its verdict.
+
+`SAP()` shows the result (`pinned A4H.001/DEVELOPER ✓`). Without a pin,
+nothing changes and no extra request is sent.
+
+The MCP server takes its logon from flags and `SAP_*` only, not from
+`.vsp.json`. Its startup log names the source (`SAP logon: user DEVELOPER
+from SAP_USER (shell environment)`), and `vsp config show` lists the sources
+for the server and for CLI subcommands.
+
 ### .env File
 ```bash
 # .env (auto-loaded from current directory)
@@ -1848,6 +2020,7 @@ SAP_PASSWORD=secret
 | `--user` | `SAP_USER` | Username |
 | `--password` | `SAP_PASSWORD` | Password |
 | `--client` | `SAP_CLIENT` | Client (default: 001) |
+| `--expect` | `SAP_EXPECT` | Pin `SID[.CLIENT][/USER]`; refuse to work anywhere else (see above) |
 | `--mode` | `SAP_MODE` | `hyperfocused` (recommended), `focused`, or `expert` |
 | `--cookie-file` | `SAP_COOKIE_FILE` | Netscape cookie file |
 | `--sso` | `SAP_SSO` | Browser SSO; re-captures the session when it expires |
@@ -2415,7 +2588,7 @@ Uses **ABAP SQL syntax**, not standard SQL:
 ```bash
 # Build
 make build          # Current platform
-make build-all      # All 9 platforms
+make build-all      # Common 3 platforms (build-all-all: all 6)
 
 # Test (go.mod pins toolchain go1.26.8)
 go test ./...                              # Unit tests (1354)
@@ -2519,7 +2692,7 @@ vibing-steampunk/
 |--------|-------|
 | **Tools** | 148 expert, 98 focused, 1 universal |
 | **Unit Tests** | 1354 (`go test ./... -list '.*'`; integration tests excluded by build tag) |
-| **Platforms** | 9 (Linux, macOS, Windows × amd64/arm64/386) |
+| **Platforms** | 6 (Linux, macOS, Windows × amd64/arm64) |
 
 <details>
 <summary><strong>Roadmap</strong></summary>
