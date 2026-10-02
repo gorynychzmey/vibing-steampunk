@@ -47,26 +47,69 @@ git push origin vX.Y.Z
 The tag subject after `vX.Y.Z: ` becomes the release title (`vX.Y.Z: <title>`).
 Push **only the tag**; CI pushes nothing anywhere.
 
+### LTS (release/X.Y)
+
+v2.59.x is an LTS line: its patches are cut from `release/2.59`, not main. A
+patch is a fix that has landed on main, carried over with `cherry-pick -x` (the
+`(cherry picked from commit …)` line names the main commit), plus the notes:
+
+```bash
+git fetch origin
+git switch -c lts/vX.Y.Z origin/release/X.Y
+git cherry-pick -x <main-sha>...               # each fix, oldest first
+# README.md "What's New": add `### vX.Y.Z` (e.g. `### v2.59.2`) on this branch;
+# that section is the release notes. CHANGELOG.md as usual.
+# PR into release/X.Y (not main); after it is merged:
+git switch release/X.Y && git pull --ff-only   # a local branch tracking origin/release/X.Y
+git tag -a vX.Y.Z -m "Release vX.Y.Z: <title>"
+git push origin vX.Y.Z                         # only the tag
+```
+
+- `prepare` accepts a tag on `origin/main`, or on exactly one
+  `origin/release/X.Y` whose X.Y is the tag's major.minor. A v2.60.x on
+  release/2.59, or a v2.59.x only on some other branch, is refused; the error
+  lists the branches checked (`.github/ci/release.sh on-branch vX.Y.Z` says the
+  same locally after a `git fetch origin`).
+- The gates (test, leak scan, build, run, publish) run on the tag's commit,
+  with the `release.sh` in it: an LTS release ships the platform set its own
+  line ships.
+- A tag push runs `release.yml` as it is at the tag. If `release/X.Y` predates
+  the LTS rule (`release.sh on-branch`), that run is refused before anything
+  is built; run it from main instead:
+  `gh workflow run release.yml --ref main -f tag=vX.Y.Z`.
+- `workflow_dispatch` is accepted only from `main` or a `release/X.Y` branch
+  (checked in the workflow before any checked-out code runs), and a
+  dispatched prepare takes `release.sh on-branch` from main, never from the
+  dispatched branch.
+- Latest: an LTS patch is marked latest only if it is above every published
+  final release, so v2.59.2 after v2.60.0 is never latest and `vsp update`
+  keeps offering v2.60.x. Publish jobs run one at a time across all tags
+  (concurrency group `release-publish`) and decide latest right before going
+  public, so two releases at once cannot both end up latest. GitHub keeps one
+  pending job per group: a third queued publish is cancelled (nothing goes
+  public); dispatch it again.
+
 ## 4. What CI does
 
 `release.yml`, on the tag push (or `gh workflow run release.yml -f tag=vX.Y.Z`
 for an existing tag that has no release yet):
 
-1. **prepare**: tag format, tag commit is on `main`, no release exists for it.
+1. **prepare**: tag format, tag commit is on `main` (or, for an LTS patch, on
+   its own `release/X.Y`), no release exists for it.
 2. **test**: `go test -race ./...` at the tag.
 3. **leak scan**: the tag's tree and the commits since the previous tag, with
    the `VSP_LEAK_IDENTIFIERS` list (fails closed without it).
-4. **build and verify** (`.github/ci/release.sh`): nine binaries + `checksums.txt`
+4. **build and verify** (`.github/ci/release.sh`): six binaries + `checksums.txt`
    + `LICENSE` + `NOTICE`, then by content:
    - exactly that file set, nothing stale;
    - each executable header is the platform its name says (ELF/Mach-O/PE + arch);
-   - Go's build info in each binary: GOOS/GOARCH (GOARM=7), `vcs.revision` = the
+   - Go's build info in each binary: GOOS/GOARCH, `vcs.revision` = the
      tag commit, `vcs.modified=false`, `main.Version` = the tag;
-   - `checksums.txt` has exactly the nine lines and every one matches;
+   - `checksums.txt` has exactly the six lines and every one matches;
    - `--version` prints exactly `vsp version vX.Y.Z (commit: <sha>, …)` for
-     linux amd64/386, and arm64/arm under qemu.
+     linux amd64, and arm64 under qemu.
 5. **run**: the same `--version` check on macOS (darwin-arm64; darwin-amd64 if
-   Rosetta is there, else a warning) and Windows (amd64, 386; arm64 on a
+   Rosetta is there, else a warning) and Windows (amd64; arm64 on a
    Windows ARM runner).
 6. **publish**: notes from the README (else git-cliff), release created as a
    **draft**, every asset downloaded back and compared byte for byte. Just
@@ -82,7 +125,7 @@ gh run watch                                   # or: gh run list --workflow rele
 gh release view vX.Y.Z --json name,isDraft,assets -q '.name, .isDraft, [.assets[].name]'
 ```
 
-- 12 assets: 9 `vsp-*`, `checksums.txt`, `LICENSE`, `NOTICE`; not a draft.
+- 9 assets: 6 `vsp-*`, `checksums.txt`, `LICENSE`, `NOTICE`; not a draft.
 - Read the run's warnings: README section missing, CHANGELOG section missing,
   darwin-amd64 not executed. None blocks; each is something to know.
 - One look from outside, on your own platform:

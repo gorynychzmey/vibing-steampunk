@@ -69,6 +69,7 @@ func (d *Debugger) ADTListen(ctx context.Context, user, ideID, terminalID string
 	// Remembered for the teardown: a listener is removed by naming the exact
 	// triple it was registered with, and a row left behind blocks the next one.
 	d.listenUser, d.ideID, d.terminalID = strings.ToUpper(user), ideID, terminalID
+	d.listenerStopped = false
 	q := url.Values{}
 	q.Set("debuggingMode", "user")
 	q.Set("requestUser", strings.ToUpper(user))
@@ -254,15 +255,12 @@ func (d *Debugger) ADTDetach(ctx context.Context) error {
 	if !d.engaged {
 		return nil
 	}
-	// SAP's own word for "let it go" is detach; a release that does not know it
-	// still has to release the debuggee, so continue is the fallback rather than
-	// terminateDebuggee, which would kill the user's session outright.
-	res, err := d.ADT(ctx, "POST", "/sap/bc/adt/debugger?method=detach",
-		[]ADTHeader{{Name: "Accept", Value: acceptAnything}}, nil)
-	if err != nil || res.Status < 200 || res.Status >= 300 {
-		_, _ = d.ADTStep(ctx, "stepContinue")
-	}
-	if user := d.listenUser; user != "" {
+	// Whether the debuggee half was confirmed does not change what comes
+	// next: the listener goes either way, and with it external debugging.
+	_ = d.DetachDebuggee(ctx)
+	// A listener already removed from another connection (ADTStopListenerVia)
+	// is not removed twice: SAP confirmed it is gone.
+	if user := d.listenUser; user != "" && !d.listenerStopped {
 		// The listener is removed by naming the user and nothing else. In user
 		// debugging mode SAP does not store the ideId and terminalId it was
 		// given: ABDBG_LISTENER holds IDE_ID = the user and TERMINAL_ID =
@@ -276,15 +274,92 @@ func (d *Debugger) ADTDetach(ctx context.Context) error {
 		// choice available to us: the two are the same act. So a detach leaves a
 		// clean slate, and anything that wants to catch a second debuggee arms
 		// its breakpoints again first.
-		q := url.Values{}
-		q.Set("debuggingMode", "user")
-		q.Set("requestUser", user)
-		if _, lerr := d.ADT(ctx, "DELETE", "/sap/bc/adt/debugger/listeners?"+q.Encode(), nil, nil); lerr != nil {
+		if _, lerr := d.ADT(ctx, "DELETE", listenerURI(user), nil, nil); lerr != nil {
 			return lerr
 		}
 	}
 	d.engaged = false
 	return nil
+}
+
+// listenerURI names the user's listener registration the way ADTDetach
+// removes it: by the user alone (see there for why not the ids).
+func listenerURI(user string) string {
+	q := url.Values{}
+	q.Set("debuggingMode", "user")
+	q.Set("requestUser", user)
+	return "/sap/bc/adt/debugger/listeners?" + q.Encode()
+}
+
+// ADTStopListenerVia removes this session's listener registration through
+// another transport — a stateless request or a second session — instead of
+// this session's own.
+//
+// It exists for the one moment this session cannot be used: while a listener
+// request is still open on it. A stateful ADT session answers one request at a
+// time, and a client that stops waiting for the listener does not end it on
+// the server — the request runs on until its timeout, and everything sent on
+// the session meanwhile queues behind it. The registration is keyed by the
+// user alone, not by the session that made it (ABDBG_LISTENER holds IDE_ID =
+// the user and TERMINAL_ID = '%_USER' in user mode), so any connection of the
+// same logon can remove it, and the DELETE is exactly the one ADTDetach sends.
+//
+// It succeeds only when SAP confirmed the removal; ADTDetach then skips the
+// DELETE it would otherwise send. Nothing else is released: the breakpoints
+// and any attached debuggee belong to this session and are released on it.
+func (d *Debugger) ADTStopListenerVia(ctx context.Context, t ADTTransport) error {
+	user := d.listenUser
+	if user == "" || d.listenerStopped {
+		return nil // nothing registered from here, or already removed
+	}
+	if t == nil {
+		return fmt.Errorf("stop listener: no separate connection")
+	}
+	res, err := t.Do(ctx, ADTRequest{Method: "DELETE", URI: listenerURI(user)})
+	if err != nil {
+		return err
+	}
+	if res == nil {
+		return fmt.Errorf("stop listener: no answer")
+	}
+	if res.Status < 200 || res.Status >= 300 {
+		return adtError("stop listener", res)
+	}
+	d.listenerStopped = true
+	return nil
+}
+
+// DetachDebuggee releases the debuggee attached to this session, if any, and
+// leaves the listener registration and the breakpoints alone: it is the
+// debuggee half of ADTDetach, for a caller that means to go on listening.
+//
+// SAP's own word for "let it go" is detach; a release that does not know it
+// (A4H answers 400, "Unknown method") still has to release the debuggee, so
+// continue is the fallback rather than terminateDebuggee, which would kill the
+// user's session outright.
+//
+// It returns nil only when SAP confirmed that nothing is attached any more:
+// the detach was accepted, or the fallback answered that the debuggee ended or
+// that no session is attached. A continue that answers 200 means the program
+// stopped again, at another breakpoint, and is still attached; that, and any
+// failure to get an answer, is an error.
+func (d *Debugger) DetachDebuggee(ctx context.Context) error {
+	res, err := d.ADT(ctx, "POST", "/sap/bc/adt/debugger?method=detach",
+		[]ADTHeader{{Name: "Accept", Value: acceptAnything}}, nil)
+	if err == nil && res.Status >= 200 && res.Status < 300 {
+		return nil
+	}
+	sres, serr := d.ADTStep(ctx, "stepContinue")
+	switch {
+	case serr == nil:
+		return fmt.Errorf("detach: the debuggee ran on and stopped again; it is still attached")
+	case strings.Contains(serr.Error(), "debuggeeEnded"), strings.Contains(serr.Error(), "noSessionAttached"):
+		return nil
+	case sres == nil:
+		return fmt.Errorf("detach: no answer from SAP: %w", serr)
+	default:
+		return fmt.Errorf("detach: %w", serr)
+	}
 }
 
 // ADTStep executes one step: stepInto, stepOver, stepReturn, stepContinue.
