@@ -16,6 +16,7 @@ import (
 	"github.com/oisee/vibing-steampunk/internal/mcp"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/config"
+	"github.com/oisee/vibing-steampunk/pkg/mcpext"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -353,6 +354,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	cfg.Build = sweepBuild()
 
 	// Create and start MCP server
+	cfg.Extensions = extensions
 	srv := mcp.NewServer(cfg)
 
 	return serveMCP(cmd, func() error {
@@ -988,8 +990,20 @@ func splitCommaSeparated(s string) []string {
 	return result
 }
 
-// Run is vsp: the command line and, through it, the MCP server.
-func Run() {
+// extensions are the ones Run was given; the MCP server routes to them after
+// its built-in actions.
+var extensions []mcpext.Extension
+
+// Run is vsp: the command line and, through it, the MCP server. A downstream
+// binary passes its extensions; the release binary passes none and behaves
+// exactly as before. Extensions that conflict -- with each other or with a
+// built-in action or type -- stop it before anything starts.
+func Run(exts ...mcpext.Extension) {
+	if err := mcp.ValidateExtensions(exts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	extensions = exts
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
