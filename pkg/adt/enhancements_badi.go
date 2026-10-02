@@ -76,7 +76,7 @@ func (c *Client) CreateBadiImplementation(ctx context.Context, opts BadiImplemen
 	// here instead, before anything is written.
 	if opts.Transport == "" && !strings.HasPrefix(opts.Package, "$") && !c.config.Safety.AllowTransportableEdits {
 		return "", fmt.Errorf("CreateBadiImplementation in package %s is blocked: it is not a local ($) package, and editing transportable "+
-			"objects is disabled (use --allow-transportable-edits and name a transport)", opts.Package)
+			"objects is disabled (use --allow-transportable-edits; name a transport unless the transport choice picks one)", opts.Package)
 	}
 	// The implementation is written by a PUT into the container: an update.
 	// Refused here, before the POST, so a refusal leaves no empty ENHO.
