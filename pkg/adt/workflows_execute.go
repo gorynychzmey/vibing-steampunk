@@ -2,10 +2,11 @@ package adt
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"net/url"
 	"strings"
-	"time"
 )
 
 // --- Execute ABAP Code via Unit Test ---
@@ -22,6 +23,13 @@ type ExecuteABAPResult struct {
 
 	// Failure is what stopped the code before it finished, when something did.
 	Failure *ExecuteFailure `json:"failure,omitempty"`
+
+	// ResultText is Output in the shape a caller wants to read: the one value
+	// as a string when the code returned one, an array when it returned several
+	// (RETURN_VALUE( ) more than once), and absent when nothing came back. It
+	// is the full value, unwrapped from SAP's "Critical Assertion Error: '…'"
+	// sentence and never shortened.
+	ResultText any `json:"result_text,omitempty"`
 }
 
 // ExecuteFailure is a run that ended in the middle of the caller's code.
@@ -145,9 +153,10 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 		Output: []string{},
 	}
 
-	// Generate unique program name using timestamp
-	timestamp := fmt.Sprintf("%d", time.Now().UnixNano()/1000000)                     // milliseconds
-	programName := strings.ToUpper(opts.ProgramPrefix + timestamp[len(timestamp)-8:]) // Last 8 digits
+	programName, err := temporaryProgramName(opts.ProgramPrefix)
+	if err != nil {
+		return nil, err
+	}
 	result.ProgramName = programName
 	objectURL := fmt.Sprintf("/sap/bc/adt/programs/programs/%s", url.PathEscape(programName))
 
@@ -163,11 +172,13 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 	source := executeWrapperSource(programName, riskLevelABAP, opts.ReturnVariable, code)
 
 	// Step 1: Create the temp program
-	err := c.CreateObject(ctx, CreateObjectOptions{
+	err = c.CreateObject(ctx, CreateObjectOptions{
 		ObjectType:  ObjectTypeProgram,
 		Name:        programName,
 		Description: "Temp program for ExecuteABAP",
 		PackageName: "$TMP",
+		// A failed create must not delete an object it cannot show is its own.
+		leavePartialObject: true,
 	})
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to create temp program: %v", err)
@@ -190,21 +201,11 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 			cleanupCtx, cancel := failureCleanupContext(ctx)
 			defer cancel()
 
-			lock, lockErr := c.LockObject(cleanupCtx, objectURL, "MODIFY")
-			if lockErr != nil {
-				appendExecuteCleanupWarning(result, fmt.Sprintf("could not lock the temporary program for cleanup: %v", lockErr))
-				return
+			warnings := c.deleteTemporaryProgram(cleanupCtx, objectURL, programName)
+			for _, warning := range warnings {
+				appendExecuteCleanupWarning(result, warning)
 			}
-
-			// DELETE is intentionally attempted once. A failed request is an
-			// unknown result, not permission to retry a potentially completed
-			// mutation. CleanedUp therefore means only that this DELETE succeeded;
-			// it does not claim a subsequent read verified the object is absent.
-			if deleteErr := c.DeleteObject(cleanupCtx, objectURL, lock.LockHandle, ""); deleteErr != nil {
-				appendExecuteCleanupWarning(result, fmt.Sprintf("temporary-program DELETE outcome is unknown and was not retried: %v", deleteErr))
-				if unlockErr := c.releaseLockAfterFailure(cleanupCtx, objectURL, lock.LockHandle); unlockErr != nil {
-					appendExecuteCleanupWarning(result, strandedLockAdvice(objectURL, unlockErr))
-				}
+			if len(warnings) > 0 {
 				return
 			}
 
@@ -233,6 +234,14 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to unlock: %v", err)
+		// The UNLOCK above fails before it is sent when ctx has expired;
+		// retry it detached, or the temp program stays locked (and, with
+		// KeepProgram, nothing else would release it).
+		if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+			appendExecuteCleanupWarning(result, strandedLockAdvice(objectURL, unlockErr))
+		} else {
+			result.Message += " — the lock was released on a retry"
+		}
 		return result, nil
 	}
 
@@ -275,23 +284,19 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 		// A failure while the test class itself is being set up lands on the
 		// class rather than on the method, and a payload that dies in a
 		// CLASS-CONSTRUCTOR or a DATA declaration dies exactly there.
-		result.RawAlerts = append(result.RawAlerts, class.Alerts...)
+		alerts := append([]UnitTestAlert(nil), class.Alerts...)
 		for _, method := range class.TestMethods {
 			result.ExecutionTime += method.ExecutionTime
-			for _, alert := range method.Alerts {
-				result.RawAlerts = append(result.RawAlerts, alert)
-
-				// Look for our EXEC_RESULT marker in the alert title
-				if output, found := execResult(alert.Title); found {
-					result.Output = append(result.Output, output)
-				}
-
-				// Also check details for additional output
-				for _, detail := range alert.Details {
-					if output, found := execResult(detail); found {
-						result.Output = append(result.Output, output)
-					}
-				}
+			alerts = append(alerts, method.Alerts...)
+		}
+		for _, alert := range alerts {
+			result.RawAlerts = append(result.RawAlerts, alert)
+			// Every alert that carries the marker is a value, wherever ABAP
+			// Unit chose to file it. Reading only the method's alerts is how a
+			// run could carry its result and still be reported as having
+			// captured nothing.
+			if output, found := alertExecResult(alert); found {
+				result.Output = append(result.Output, output)
 			}
 		}
 	}
@@ -347,6 +352,7 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 	}
 
 	result.Success = result.Failure == nil
+	result.ResultText = resultText(result.Output)
 	switch {
 	case result.Failure != nil:
 		result.Message = fmt.Sprintf("The code did not finish: %s", result.Failure.Title)
@@ -357,6 +363,90 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 	}
 
 	return result, nil
+}
+
+// deleteTemporaryProgram removes a program a workflow created for itself, and
+// returns what went wrong; no warnings means the DELETE succeeded.
+//
+// DELETE is attempted once. A failed request is an unknown result, not
+// permission to retry a potentially completed mutation, and a successful one
+// is not followed by a read to verify the object is gone.
+//
+// Every warning names the program, because a warning means it may still be in
+// $TMP and the name is what the user needs to find and delete it.
+func (c *Client) deleteTemporaryProgram(ctx context.Context, objectURL, programName string) []string {
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+	if err != nil {
+		return []string{fmt.Sprintf("could not lock the temporary program for cleanup, so %s is still in $TMP: %v", programName, err)}
+	}
+	if err := c.DeleteObject(ctx, objectURL, lock.LockHandle, ""); err != nil {
+		warnings := []string{fmt.Sprintf("temporary-program DELETE outcome is unknown and was not retried, so %s may still be in $TMP: %v", programName, err)}
+		if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+			warnings = append(warnings, strandedLockAdvice(objectURL, unlockErr))
+		}
+		return warnings
+	}
+	return nil
+}
+
+// temporaryProgramDigits is how many random digits follow a temporary
+// program's prefix: the same eight the millisecond timestamp used to supply,
+// so names keep their shape and length (ZTEMP_EXEC_ + 8 = 19 characters, well
+// inside the 30 a program name may have).
+const temporaryProgramDigits = 8
+
+// temporaryProgramName returns prefix followed by eight random digits.
+//
+// The digits come from crypto/rand rather than the clock: two calls in the
+// same millisecond — two agents, or one agent's parallel calls — used to get
+// the same name, and the second create then met the first one's program.
+func temporaryProgramName(prefix string) (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(100_000_000))
+	if err != nil {
+		return "", fmt.Errorf("generating a temporary program name: %w", err)
+	}
+	return strings.ToUpper(fmt.Sprintf("%s%0*d", prefix, temporaryProgramDigits, n.Int64())), nil
+}
+
+// Lean is the result as execute_abap and `vsp execute --json` report it: every
+// field kept, except that the raw alerts are dropped once a value came back.
+// They are then the same value again, wrapped in SAP's sentence and a stack —
+// tokens a caller pays for and never reads. When no value came back they are
+// the only evidence of what happened, and stay.
+func (r ExecuteABAPResult) Lean() ExecuteABAPResult {
+	if len(r.Output) > 0 {
+		r.RawAlerts = nil
+	}
+	return r
+}
+
+// resultText is the result_text a caller reads: one value as itself, several
+// as an array in the order the code returned them, none as nothing.
+func resultText(output []string) any {
+	switch len(output) {
+	case 0:
+		return nil
+	case 1:
+		return output[0]
+	default:
+		return append([]string(nil), output...)
+	}
+}
+
+// alertExecResult is the value an alert hands back, if it is the closing
+// assertion. One alert is one value: SAP puts the message in the title, and a
+// detail is only read when the title does not carry it, so a value that is
+// repeated there is not counted twice.
+func alertExecResult(alert UnitTestAlert) (string, bool) {
+	if output, found := execResult(alert.Title); found {
+		return output, true
+	}
+	for _, detail := range alert.Details {
+		if output, found := execResult(detail); found {
+			return output, true
+		}
+	}
+	return "", false
 }
 
 func appendExecuteCleanupWarning(result *ExecuteABAPResult, warning string) {
@@ -373,31 +463,102 @@ func appendExecuteCleanupWarning(result *ExecuteABAPResult, warning string) {
 // back, and the line the payload starts on — and a template nobody can call is
 // a template nobody can test.
 func executeWrapperSource(programName, riskLevel, returnVariable, code string) string {
-	return fmt.Sprintf(`REPORT %s.
+	return fmt.Sprintf(`REPORT %[1]s.
 
-*&---------------------------------------------------------------------*
-*& Auto-generated program for code execution via unit test
-*& Generated by vsp ExecuteABAP workflow
-*&---------------------------------------------------------------------*
+*& Generated by vsp ExecuteABAP: the code below runs inside a unit test.
 
-CLASS ltc_executor DEFINITION FOR TESTING %s DURATION SHORT.
+CLASS ltc_executor DEFINITION FOR TESTING %[2]s DURATION SHORT.
   PUBLIC SECTION.
     METHODS execute_payload FOR TESTING.
+  PRIVATE SECTION.
+    DATA mv_vsp_returned TYPE abap_bool.
+    METHODS return_value IMPORTING value TYPE any.
 ENDCLASS.
 
 CLASS ltc_executor IMPLEMENTATION.
   METHOD execute_payload.
-    DATA %s TYPE string.
+    DATA %[3]s TYPE string.
 
-    %s
-%s
+    %[4]s
+%[5]s
     " === USER CODE END ===
 
-    " Return result via assertion message
-    cl_abap_unit_assert=>fail( msg = |%s{ %s }| ).
+    " Hand back the return variable: always when RETURN_VALUE( ) was never
+    " called, and otherwise only when it was set.
+    IF mv_vsp_returned = abap_false OR %[3]s IS NOT INITIAL.
+      cl_abap_unit_assert=>fail( msg = |%[6]s{ %[3]s }| ).
+    ENDIF.
+  ENDMETHOD.
+
+  " RETURN_VALUE( x ) hands one value back at once, without leaving the
+  " method, so a RETURN, CHECK or exception after it cannot lose it.
+  METHOD return_value.
+    DATA lv_vsp_text TYPE string.
+    DATA lr_vsp_data TYPE REF TO data.
+    DATA lo_vsp_object TYPE REF TO object.
+    FIELD-SYMBOLS <lv_vsp_elem> TYPE simple.
+    FIELD-SYMBOLS <lv_vsp_any> TYPE any.
+    mv_vsp_returned = abap_true.
+    DATA(lo_vsp_type) = cl_abap_typedescr=>describe_by_data( value ).
+    CASE lo_vsp_type->kind.
+      WHEN cl_abap_typedescr=>kind_elem.
+        ASSIGN value TO <lv_vsp_elem>.
+        lv_vsp_text = |{ <lv_vsp_elem> }|.
+      WHEN cl_abap_typedescr=>kind_ref.
+        CASE CAST cl_abap_refdescr( lo_vsp_type )->get_referenced_type( )->kind.
+          WHEN cl_abap_typedescr=>kind_class OR cl_abap_typedescr=>kind_intf.
+            lo_vsp_object = value.
+            IF lo_vsp_object IS BOUND.
+              lv_vsp_text = |<object { cl_abap_typedescr=>describe_by_object_ref( lo_vsp_object )->get_relative_name( ) }>|.
+            ELSE.
+              lv_vsp_text = '<initial reference>'.
+            ENDIF.
+          WHEN OTHERS.
+            " A data reference hands back what it points to. A reference to
+            " a reference is followed in a bounded loop, so a chain that
+            " points back at itself cannot recurse without end.
+            lr_vsp_data = value.
+            DO 16 TIMES.
+              IF lr_vsp_data IS NOT BOUND.
+                EXIT.
+              ENDIF.
+              ASSIGN lr_vsp_data->* TO <lv_vsp_any>.
+              DATA(lo_vsp_inner) = cl_abap_typedescr=>describe_by_data( <lv_vsp_any> ).
+              IF lo_vsp_inner->kind <> cl_abap_typedescr=>kind_ref.
+                return_value( <lv_vsp_any> ).
+                RETURN.
+              ENDIF.
+              DATA(lv_vsp_inner_kind) = CAST cl_abap_refdescr( lo_vsp_inner )->get_referenced_type( )->kind.
+              IF lv_vsp_inner_kind = cl_abap_typedescr=>kind_class OR lv_vsp_inner_kind = cl_abap_typedescr=>kind_intf.
+                return_value( <lv_vsp_any> ).
+                RETURN.
+              ENDIF.
+              lr_vsp_data = <lv_vsp_any>.
+            ENDDO.
+            IF lr_vsp_data IS NOT BOUND.
+              lv_vsp_text = '<initial reference>'.
+            ELSE.
+              lv_vsp_text = '<reference chain too deep or cyclic>'.
+            ENDIF.
+        ENDCASE.
+      WHEN OTHERS.
+        " Structures and tables come back as JSON.
+        TRY.
+            DATA(lo_vsp_json) = cl_sxml_string_writer=>create( type = if_sxml=>co_xt_json ).
+            CALL TRANSFORMATION id SOURCE value = value RESULT XML lo_vsp_json.
+            lv_vsp_text = cl_abap_codepage=>convert_from( lo_vsp_json->get_output( ) ).
+            " id wraps the value as {"VALUE":...}; hand back only the value.
+            IF strlen( lv_vsp_text ) > 10 AND lv_vsp_text(9) = '{"VALUE":'.
+              lv_vsp_text = substring( val = lv_vsp_text off = 9 len = strlen( lv_vsp_text ) - 10 ).
+            ENDIF.
+          CATCH cx_root INTO DATA(lx_vsp_json).
+            lv_vsp_text = |<not serializable: { lx_vsp_json->get_text( ) }>|.
+        ENDTRY.
+    ENDCASE.
+    cl_abap_unit_assert=>fail( msg = |%[6]s{ lv_vsp_text }| quit = if_aunit_constants=>no ).
   ENDMETHOD.
 ENDCLASS.
-`, programName, riskLevel, returnVariable, payloadStartMarker, code, execResultMarker, returnVariable)
+`, programName, riskLevel, returnVariable, payloadStartMarker, code, execResultMarker)
 }
 
 // PayloadFailure picks the alert that says the executed code died rather than
@@ -584,8 +745,13 @@ func callerLine(m ActivationResultMessage, programName string, offset int) int {
 	return line - offset + 1
 }
 
-// ExecuteABAPMultiple executes ABAP code and returns multiple results via chained assertions.
+// ExecuteABAPMultiple executes ABAP code that returns several values.
 // Each call to RETURN_VALUE( ) in the code adds a value to the output.
+//
+// Every ExecuteABAP run now supports RETURN_VALUE( ), so this is the same call
+// under its old name. The macro it used to wrap the code in handed back only
+// the first value: cl_abap_unit_assert=>fail leaves the test method by default,
+// so the loop that was meant to report the rest never got past its first turn.
 //
 // Example:
 //
@@ -597,26 +763,5 @@ func callerLine(m ActivationResultMessage, programName string, offset int) int {
 //	`, nil)
 //	// result.Output contains one entry per client
 func (c *Client) ExecuteABAPMultiple(ctx context.Context, code string, opts *ExecuteABAPOptions) (*ExecuteABAPResult, error) {
-	// Wrap the code with a macro that chains assertions
-	wrappedCode := `
-    DATA lt_exec_results TYPE string_table.
-
-    DEFINE RETURN_VALUE.
-      APPEND &1 TO lt_exec_results.
-    END-OF-DEFINITION.
-
-    ` + code + `
-
-    " Output all collected results
-    DATA lv_idx TYPE i.
-    LOOP AT lt_exec_results INTO DATA(lv_exec_result).
-      lv_idx = lv_idx + 1.
-      cl_abap_unit_assert=>fail( msg = |EXEC_RESULT:{ lv_exec_result }| ).
-    ENDLOOP.
-
-    " Mark completion
-    lv_result = |Completed with { lines( lt_exec_results ) } results|.
-`
-
-	return c.ExecuteABAP(ctx, wrappedCode, opts)
+	return c.ExecuteABAP(ctx, code, opts)
 }

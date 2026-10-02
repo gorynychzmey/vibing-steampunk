@@ -6,16 +6,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
 
-// routeDevToolsAction routes "test" (unit tests), "analyze" (syntax check), "edit" (activate), and "analyze" (execute_abap).
+// routeDevToolsAction routes "test" (unit tests), "analyze" (syntax check), "edit" (activate), and "analyze" (execute_abap, check_abap).
 func (s *Server) routeDevToolsAction(ctx context.Context, action, objectType, objectName string, params map[string]any) (*mcp.CallToolResult, bool, error) {
 	if action == "test" {
 		analysisType := getStringParam(params, "type")
-		if analysisType == "" || analysisType == "unit" {
+		// target="ATC" asks for an ATC run, not a unit-test run, even though
+		// both carry an object_url; routeATCAction takes it.
+		if !isATCTarget(objectType) && (analysisType == "" || analysisType == "unit") {
 			// Unit tests
 			objectURL := getStringParam(params, "object_url")
 			if objectURL == "" {
@@ -28,6 +31,12 @@ func (s *Server) routeDevToolsAction(ctx context.Context, action, objectType, ob
 			if v, ok := getBoolParam(params, "include_long"); ok {
 				args["include_long"] = v
 			}
+			if v, ok := params["timeout"]; ok {
+				args["timeout"] = v
+			}
+			if v, ok := getBoolParam(params, "only_failures"); ok {
+				args["only_failures"] = v
+			}
 			return s.callHandler(ctx, s.handleRunUnitTests, args)
 		}
 	}
@@ -39,6 +48,8 @@ func (s *Server) routeDevToolsAction(ctx context.Context, action, objectType, ob
 			return s.callHandler(ctx, s.handleSyntaxCheck, params)
 		case "execute_abap":
 			return s.callHandler(ctx, s.handleExecuteABAP, params)
+		case "check_abap":
+			return s.callHandler(ctx, s.handleCheckABAP, params)
 		}
 	}
 
@@ -54,6 +65,12 @@ func (s *Server) routeDevToolsAction(ctx context.Context, action, objectType, ob
 	}
 
 	return nil, false, nil
+}
+
+// isATCTarget reports whether a test target names an ATC run, which
+// routeATCAction answers.
+func isATCTarget(objectType string) bool {
+	return objectType == "ATC" || objectType == "ATC_CUSTOMIZING"
 }
 
 // --- Development Tool Handlers ---
@@ -78,7 +95,39 @@ func (s *Server) handleSyntaxCheck(ctx context.Context, request mcp.CallToolRequ
 	return mcp.NewToolResultText(string(output)), nil
 }
 
+// handleCheckABAP type-checks a snippet without running it: SAP's syntax
+// check of the snippet wrapped as execute_abap wraps it. It creates and
+// deletes a temporary program in $TMP, so --read-only refuses it.
+func (s *Server) handleCheckABAP(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	code, _ := request.GetArguments()["code"].(string)
+	if code == "" {
+		return newToolResultError("code is required"), nil
+	}
+
+	result, err := s.adtClient.CheckABAP(ctx, code)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("check_abap failed: %v", err)), nil
+	}
+
+	output, _ := json.MarshalIndent(result, "", "  ")
+	if !result.CleanedUp {
+		// The check itself is in the payload, but a program left in $TMP is
+		// a failure of the call: it is named up front so it gets deleted.
+		return newToolResultError(fmt.Sprintf("check_abap left the temporary program %s in $TMP: %s\n\n%s",
+			result.ProgramName, strings.Join(result.Warnings, "; "), output)), nil
+	}
+	return mcp.NewToolResultText(string(output)), nil
+}
+
+// handleActivate and the other activations are long calls: a cold activation
+// of a large object runs past the client's 60s per-request timeout, and the
+// call's budget (params.timeout or --call-timeout) is what bounds it instead.
 func (s *Server) handleActivate(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return s.longCall(ctx, request, "Activate", s.activate)
+}
+
+// activate is handleActivate without the call budget (see longCall).
+func (s *Server) activate(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	objectURL, ok := request.GetArguments()["object_url"].(string)
 	if !ok || objectURL == "" {
 		return newToolResultError("object_url is required"), nil
@@ -109,6 +158,11 @@ func (s *Server) handleActivate(ctx context.Context, request mcp.CallToolRequest
 //
 //	array of strings in "TYPE NAME" format (e.g. "INCL ZREP_F01").
 func (s *Server) handleActivateMultiple(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return s.longCall(ctx, request, "ActivateMultiple", s.activateMultiple)
+}
+
+// activateMultiple is handleActivateMultiple without the call budget (see longCall).
+func (s *Server) activateMultiple(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	raw, ok := request.GetArguments()["objects"]
 	if !ok {
 		return newToolResultError("objects is required (array of {url, name} or [\"TYPE NAME\", ...])"), nil
@@ -151,6 +205,11 @@ func (s *Server) handleActivateMultiple(ctx context.Context, request mcp.CallToo
 }
 
 func (s *Server) handleActivatePackage(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return s.longCall(ctx, request, "ActivatePackage", s.activatePackage)
+}
+
+// activatePackage is handleActivatePackage without the call budget (see longCall).
+func (s *Server) activatePackage(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	packageName := ""
 	if pkg, ok := request.GetArguments()["package"].(string); ok {
 		packageName = pkg
@@ -171,6 +230,11 @@ func (s *Server) handleActivatePackage(ctx context.Context, request mcp.CallTool
 }
 
 func (s *Server) handleRunUnitTests(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return s.longCall(ctx, request, "ABAP Unit run", s.runUnitTests)
+}
+
+// runUnitTests is handleRunUnitTests without the call budget (see longCall).
+func (s *Server) runUnitTests(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	objectURL, ok := request.GetArguments()["object_url"].(string)
 	if !ok || objectURL == "" {
 		return newToolResultError("object_url is required"), nil
@@ -187,11 +251,15 @@ func (s *Server) handleRunUnitTests(ctx context.Context, request mcp.CallToolReq
 		flags.Long = true
 	}
 
+	onlyFailures, _ := request.GetArguments()["only_failures"].(bool)
+
 	result, err := s.adtClient.RunUnitTests(ctx, objectURL, &flags)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Unit test run failed: %v", err)), nil
 	}
 
-	output, _ := json.MarshalIndent(result, "", "  ")
+	// ok and counts on top of the classes this tool always answered; with
+	// only_failures, the failed methods alone, in the lean shape.
+	output, _ := adt.IndentJSON(adt.NewUnitTestReport(result, onlyFailures))
 	return mcp.NewToolResultText(string(output)), nil
 }

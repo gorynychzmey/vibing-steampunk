@@ -430,45 +430,21 @@ func buildClient(params *systemParams) (*adt.Client, error) {
 	return adt.NewClient(params.URL, params.User, params.Password, opts...), nil
 }
 
-// systemCookies returns the browser session a system authenticates with, if it
-// uses one. A system on a password has none, and that is not an error.
-func systemCookies(ctx context.Context, params *systemParams) (map[string]string, error) {
-	switch {
-	case params.UsesSSO():
-		provider, err := newSSOProvider(params)
-		if err != nil {
-			return nil, err
-		}
-		return provider.Cookies(ctx)
-	case params.CookieFile != "":
-		return adt.LoadCookiesFromFile(params.CookieFile)
-	case params.CookieString != "":
-		return adt.ParseCookieString(params.CookieString), nil
-	}
-	return nil, nil
-}
-
-// getWSClient creates an AMDP WebSocket client for GitExport.
+// getWSClient creates an AMDP WebSocket client for GitExport, authenticated as
+// the system's ADT client is: its cookie_file, cookie_string or single sign-on
+// session, or its password when it has none.
+//
+// The ADT client exists only to derive the WebSocket's credentials, so it is
+// built without the response cache: with a cache_path that would open a
+// SQLite store nothing here uses or closes.
 func getWSClient(ctx context.Context, params *systemParams) (*adt.AMDPWebSocketClient, error) {
-	// NewAMDPWebSocketClient(baseURL, client, user, password, insecure)
-	wsClient := adt.NewAMDPWebSocketClient(
-		params.URL,
-		params.Client,
-		params.User,
-		params.Password,
-		params.Insecure,
-	)
-
-	// A system reached through single sign-on has no password to offer, and the
-	// upgrade request carries a cookie as readily as any other.
-	cookies, err := systemCookies(ctx, params)
+	noCache := *params
+	noCache.Cache, noCache.CachePath = false, ""
+	client, err := buildClient(&noCache)
 	if err != nil {
 		return nil, err
 	}
-	if len(cookies) > 0 {
-		wsClient.SetCookies(cookies)
-	}
-
+	wsClient := client.NewAMDPWebSocketClient()
 	if err := wsClient.Connect(ctx); err != nil {
 		return nil, fmt.Errorf("failed to connect WebSocket: %w", err)
 	}
@@ -543,9 +519,18 @@ var searchCmd = &cobra.Command{
 	Short: "Search for ABAP objects",
 	Long: `Search for ABAP objects by name pattern.
 
+With --exact the query is a name, not a pattern: only objects whose name
+equals it (case-insensitive) are listed, still filtered by --type and --max.
+The name is sent without a wildcard, which the quick search matches whole.
+On a release that reads it as a prefix, at most 1000 matches are read: a
+full window is reported, as inconclusive when it held no equal name or as
+possibly incomplete when it did — add --type.
+
 Examples:
   vsp -s a4h search "ZCL_*"
-  vsp search "Z*ORDER*" --type CLAS --max 50`,
+  vsp search "Z*ORDER*" --type CLAS --max 50
+  vsp search ZCL_ORDER --exact
+  vsp search ZCL_ORDER --exact --type CLAS`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSearch,
 }
@@ -553,6 +538,7 @@ Examples:
 func init() {
 	searchCmd.Flags().StringVarP(&objectType, "type", "t", "", "Filter by object type (CLAS, PROG, INTF, etc.)")
 	searchCmd.Flags().IntVarP(&maxResults, "max", "m", 100, "Maximum results")
+	searchCmd.Flags().Bool("exact", false, "Only objects whose name equals the query (case-insensitive, no wildcards); a full 1000-match window is reported as inconclusive or incomplete, so add --type")
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -574,9 +560,37 @@ func runSearch(cmd *cobra.Command, args []string) error {
 			query, adtType, maxResults)
 	}
 
-	results, err := client.SearchObjectByType(ctx, query, adtType, maxResults)
+	exact, _ := cmd.Flags().GetBool("exact")
+	filtered, err := searchObjects(ctx, client, query, adtType, maxResults, exact)
 	if err != nil {
-		return fmt.Errorf("search failed: %w", err)
+		return err
+	}
+
+	// Output results
+	fmt.Printf("Found %d objects:\n", len(filtered))
+	for _, r := range filtered {
+		fmt.Printf("  %-10s %-40s %s\n", r.Type, r.Name, r.PackageName)
+	}
+
+	return nil
+}
+
+// searchObjects runs the search command's query: by pattern, or with exact
+// by name.
+func searchObjects(ctx context.Context, client *adt.Client, query, adtType string, maxResults int, exact bool) ([]adt.SearchResult, error) {
+	var results []adt.SearchResult
+	var err error
+	if exact {
+		var incomplete string
+		results, incomplete, err = client.SearchObjectExact(ctx, query, adtType, maxResults)
+		if err == nil && incomplete != "" {
+			fmt.Fprintf(os.Stderr, "Note: %s\n", incomplete)
+		}
+	} else {
+		results, err = client.SearchObjectByType(ctx, query, adtType, maxResults)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
 	}
 
 	// Filter by type if specified. Compare against the canonical type, since
@@ -592,13 +606,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Output results
-	fmt.Printf("Found %d objects:\n", len(filtered))
-	for _, r := range filtered {
-		fmt.Printf("  %-10s %-40s %s\n", r.Type, r.Name, r.PackageName)
-	}
-
-	return nil
+	return filtered, nil
 }
 
 // --- source command ---

@@ -10,6 +10,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/graph"
+	"github.com/oisee/vibing-steampunk/pkg/graph/adtsource"
 )
 
 // handleCheckBoundaries performs package boundary analysis.
@@ -60,17 +61,8 @@ func (s *Server) handleCheckBoundaries(ctx context.Context, request mcp.CallTool
 			Package: strings.ToUpper(pkg),
 		})
 
-		edges := graph.ExtractDepsFromSource(sourceCode, nodeID)
-		dynEdges := graph.ExtractDynamicCalls(sourceCode, nodeID)
-		for _, e := range append(edges, dynEdges...) {
-			g.AddEdge(e)
-			// Add target node (package unknown without SAP)
-			g.AddNode(&graph.Node{
-				ID:   e.To,
-				Name: strings.SplitN(e.To, ":", 2)[1],
-				Type: strings.SplitN(e.To, ":", 2)[0],
-			})
-		}
+		// Targets are added with no package: without SAP there is none to know.
+		g.AddSourceDeps(nodeID, sourceCode)
 
 		// If we have SAP connection, resolve packages via TADIR
 		var missed []adt.Unsearched
@@ -106,16 +98,7 @@ func (s *Server) handleCheckBoundaries(ctx context.Context, request mcp.CallTool
 			Package: strings.ToUpper(objPkg),
 		})
 
-		edges := graph.ExtractDepsFromSource(source, nodeID)
-		dynEdges := graph.ExtractDynamicCalls(source, nodeID)
-		for _, e := range append(edges, dynEdges...) {
-			g.AddEdge(e)
-			g.AddNode(&graph.Node{
-				ID:   e.To,
-				Name: strings.SplitN(e.To, ":", 2)[1],
-				Type: strings.SplitN(e.To, ":", 2)[0],
-			})
-		}
+		g.AddSourceDeps(nodeID, source)
 
 		// Resolve packages
 		missed := s.resolvePackages(ctx, g)
@@ -234,78 +217,138 @@ func (s *Server) packageGraph(ctx context.Context, pkg string, depth int) (*pack
 	var unreadable []adt.Unsearched
 	truncated := 0
 
-	for _, obj := range pkgContent.Objects {
-		// The package listing carries SAP's own two-part code — CLAS/OC,
-		// PROG/P, INTF/OI — and this compared it against the bare kind, so
-		// every object was skipped before anything was read. An empty graph
-		// then has no boundary to cross, and the answer was "Total
-		// dependencies: 0, CLEAN" for a package the CLI finds three
-		// crossings in. Nothing reported a failure because nothing was
-		// attempted.
-		objType := strings.ToUpper(obj.Type)
-		if i := strings.Index(objType, "/"); i > 0 {
-			objType = objType[:i]
-		}
-		if objType != "CLAS" && objType != "PROG" && objType != "FUGR" && objType != "INTF" {
-			continue
-		}
-
+	// read reads one object into the graph, or records why it could not, and
+	// says whether it was read.
+	read := func(objType, name, parent string) bool {
 		if count >= maxObjects {
 			// The cap is counted rather than broken on, because "we stopped
 			// at 50 of 130" and "the package has 50 objects" are different
 			// answers and the report cannot otherwise tell them apart.
 			truncated++
-			continue
+			return false
 		}
-
 		// The type is passed, not omitted. GetSource switches on it and has
 		// no branch for the empty string, so asking without one failed for
 		// every object in the package — and an object that contributes no
 		// edges is indistinguishable from a clean one, which is how this
 		// answered "Total dependencies: 0, CLEAN" for a package the CLI
 		// finds three boundary crossings in.
-		source, err := s.adtClient.GetSource(ctx, objType, obj.Name, nil)
+		source, missedParts, err := s.readPackageObjectSource(ctx, objType, name, parent)
 		if err != nil {
 			// An object we could not read contributes no edges, and no
 			// edges is what a clean object looks like. Record it or the
 			// verdict below is about code nobody opened.
-			unreadable = append(unreadable, adt.Unsearched{Object: objType + " " + obj.Name, Reason: err.Error()})
-			continue
+			unreadable = append(unreadable, adt.Unsearched{Object: objType + " " + name, Reason: err.Error()})
+			return false
 		}
-
-		nodeID := graph.NodeID(objType, obj.Name)
+		// A function group is read part by part, and a part that failed is
+		// as absent from the edges as a whole object would be.
+		for _, m := range missedParts {
+			unreadable = append(unreadable, adt.Unsearched{Object: objType + " " + name + ": " + m.Object, Reason: m.Reason})
+		}
+		// A source that came back empty has no edges, which is what a clean
+		// object looks like; it is not one that was read. (A group whose
+		// every part failed is already named part by part above.)
+		if strings.TrimSpace(source) == "" {
+			if len(missedParts) == 0 {
+				unreadable = append(unreadable, adt.Unsearched{Object: objType + " " + name, Reason: "empty source"})
+			}
+			return false
+		}
+		nodeID := graph.NodeID(objType, name)
 		g.AddNode(&graph.Node{
 			ID:      nodeID,
-			Name:    obj.Name,
+			Name:    name,
 			Type:    objType,
 			Package: strings.ToUpper(pkg),
 		})
-
-		edges := graph.ExtractDepsFromSource(source, nodeID)
-		dynEdges := graph.ExtractDynamicCalls(source, nodeID)
-		for _, e := range append(edges, dynEdges...) {
-			g.AddEdge(e)
-			g.AddNode(&graph.Node{
-				ID:   e.To,
-				Name: strings.SplitN(e.To, ":", 2)[1],
-				Type: strings.SplitN(e.To, ":", 2)[0],
-			})
-		}
+		g.AddSourceDeps(nodeID, source)
 		count++
+		return true
+	}
+
+	// The package listing carries SAP's own two-part code — CLAS/OC, PROG/P,
+	// INTF/OI. It is mapped, not cut at the slash (adtsource.SourceKind):
+	// PROG/I is an include and is read as one, FUGR/FF is one function module
+	// and not its group. A code that is neither a source kind nor one of the
+	// few excused non-source types is reported, not dropped: an entry nobody
+	// read contributes no edges, and no edges is what a clean object looks
+	// like.
+	type module struct{ name, group string }
+	var modules []module
+	groupsRead := map[string]bool{}
+	for _, obj := range pkgContent.Objects {
+		objType := adtsource.SourceKind(obj.Type)
+		switch objType {
+		case "CLAS", "PROG", "INTF", "INCL":
+			read(objType, obj.Name, "")
+		case "FUGR":
+			// Only a group that was actually read covers its modules. One
+			// refused, empty or past the cap leaves them to be read alone.
+			if read(objType, obj.Name, "") {
+				groupsRead[strings.ToUpper(obj.Name)] = true
+			}
+		case "FUNC":
+			// Decided after the walk, once it is known which groups are read.
+			modules = append(modules, module{obj.Name, adt.FunctionGroupFromURI(obj.URI)})
+		default:
+			if !adtsource.IsNonSourceType(obj.Type) {
+				unreadable = append(unreadable, adt.Unsearched{
+					Object: obj.Type + " " + obj.Name,
+					Reason: "listing type " + obj.Type + " is not one this scan reads source for, so its dependencies are not in this verdict",
+				})
+			}
+		}
+	}
+
+	// A function module's source is read with its group's, and reading it
+	// again would count a part as another whole. But only when the group is
+	// in this listing and was read: a module whose group lies elsewhere, was
+	// left beyond the cap, or could not be read, is read on its own.
+	for _, m := range modules {
+		group := m.group
+		if group == "" {
+			resolved, err := s.adtClient.ResolveFunctionGroup(ctx, m.name)
+			if err != nil {
+				unreadable = append(unreadable, adt.Unsearched{Object: "FUNC " + m.name, Reason: "its function group could not be determined: " + err.Error()})
+				continue
+			}
+			group = strings.ToUpper(resolved)
+		}
+		if groupsRead[group] {
+			continue
+		}
+		read("FUNC", m.name, group)
 	}
 	return &packageScan{Graph: g, Read: count, Unreadable: unreadable, Truncated: truncated, Cap: maxObjects}, nil
+}
+
+// readPackageObjectSource reads the source of one object from a package
+// listing. A function group has no single source: GetSource answers for FUGR
+// with the group's metadata as JSON, which parses to no dependencies at all,
+// so a group calling across packages read that way came out clean. Its
+// includes and modules are read instead, and the ones that could not be read
+// are returned.
+//
+// parent is a function module's group, and empty otherwise.
+func (s *Server) readPackageObjectSource(ctx context.Context, objType, name, parent string) (string, []adt.Unsearched, error) {
+	if objType == "FUGR" {
+		return s.adtClient.GetFunctionGroupAllSources(ctx, name)
+	}
+	source, err := s.adtClient.GetSource(ctx, objType, name, &adt.GetSourceOptions{Parent: parent})
+	return source, nil, err
 }
 
 // resolvePackages queries TADIR to fill in missing package info and correct
 // object types for nodes. The parser often guesses types (e.g., CLAS for an
 // INTF); TADIR is authoritative for both OBJECT type and DEVCLASS assignment.
 //
-// Two-pass resolution:
+// Two-pass resolution, in adtsource.ResolvePackages:
 //  1. TADIR: resolves CLAS, INTF, PROG, FUGR, TABL, etc.
 //  2. TFDIR→TADIR: for function modules not in TADIR (LIMU objects),
 //     look up TFDIR.PNAME to find the function group, then TADIR for DEVCLASS.
 //
-// The returned slice is the objects whose TADIR batch failed. It matters more
+// The returned slice is every lookup that failed (adtsource's FailedLookups). It matters more
 // than it looks: graph.classify sends a node with no package to VerdictUnknown,
 // never to VerdictViolation. So a boundary report built on a graph whose TADIR
 // lookups failed cannot report a violation it would otherwise have found, and
@@ -313,173 +356,7 @@ func (s *Server) packageGraph(ctx context.Context, pkg string, depth int) (*pack
 // callers using it only to label rows may drop it, because there the gap shows
 // as an empty package field rather than as a wrong answer.
 func (s *Server) resolvePackages(ctx context.Context, g *graph.Graph) []adt.Unsearched {
-	// Collect nodes without packages
-	var names []string
-	nodesByName := make(map[string][]*graph.Node)
-
-	for _, n := range g.Nodes() {
-		if n.Package == "" && !graph.IsStandardObject(n.Name) && !strings.HasPrefix(n.ID, "DYNAMIC:") {
-			names = append(names, n.Name)
-			nodesByName[strings.ToUpper(n.Name)] = append(nodesByName[strings.ToUpper(n.Name)], n)
-		}
-	}
-
-	if len(names) == 0 {
-		return nil
-	}
-
-	// Pass 1: TADIR batch lookup
-	missed := resolveTADIR(ctx, s.adtClient, names, nodesByName)
-
-	// Pass 2: TFDIR fallback for nodes still without packages (function modules)
-	var unresolved []string
-	for _, n := range names {
-		if nodes, ok := nodesByName[strings.ToUpper(n)]; ok {
-			for _, node := range nodes {
-				if node.Package == "" {
-					unresolved = append(unresolved, strings.ToUpper(n))
-					break
-				}
-			}
-		}
-	}
-	if len(unresolved) > 0 {
-		missed = append(missed, resolveFMviaTFDIR(ctx, s.adtClient, unresolved, nodesByName)...)
-	}
-	return missed
-}
-
-// resolveTADIR batch-queries TADIR for R3TR objects and updates node package/type.
-// It returns the names in every batch whose query failed: they keep an empty
-// package, and an empty package is read downstream as "unknown", not as "we did
-// not ask".
-func resolveTADIR(ctx context.Context, client *adt.Client, names []string, nodesByName map[string][]*graph.Node) []adt.Unsearched {
-	var missed []adt.Unsearched
-	// Batch size 5: SAP freestyle query has a ~255 char literal limit for IN clauses
-	batchSize := 5
-	for i := 0; i < len(names); i += batchSize {
-		end := i + batchSize
-		if end > len(names) {
-			end = len(names)
-		}
-		batch := names[i:end]
-		quoted := make([]string, len(batch))
-		for j, n := range batch {
-			quoted[j] = "'" + strings.ToUpper(n) + "'"
-		}
-		query := fmt.Sprintf("SELECT object, obj_name, devclass FROM tadir WHERE pgmid = 'R3TR' AND obj_name IN (%s)", strings.Join(quoted, ","))
-		result, err := client.RunQuery(ctx, query, 0)
-		if err != nil {
-			// One failed batch loses five objects, not one, so each is named.
-			for _, n := range batch {
-				missed = append(missed, adt.Unsearched{Object: strings.ToUpper(n), Reason: err.Error()})
-			}
-			continue
-		}
-		for _, row := range result.Rows {
-			objType := strings.ToUpper(strings.TrimSpace(fmt.Sprintf("%v", row["OBJECT"])))
-			objName := strings.ToUpper(strings.TrimSpace(fmt.Sprintf("%v", row["OBJ_NAME"])))
-			devclass := strings.ToUpper(strings.TrimSpace(fmt.Sprintf("%v", row["DEVCLASS"])))
-			if nodes, ok := nodesByName[objName]; ok {
-				for _, n := range nodes {
-					n.Package = devclass
-					if objType != "" && n.Type != objType {
-						n.Type = objType
-					}
-				}
-			}
-		}
-	}
-	return missed
-}
-
-// resolveFMviaTFDIR resolves function modules that aren't in TADIR as R3TR objects.
-// Strategy: TFDIR.FUNCNAME → TFDIR.PNAME (e.g., "SAPLZFUGR") → extract FUGR name
-// → TADIR lookup for the FUGR to get DEVCLASS.
-func resolveFMviaTFDIR(ctx context.Context, client *adt.Client, fmNames []string, nodesByName map[string][]*graph.Node) []adt.Unsearched {
-	var unresolved []adt.Unsearched
-	fugrSet := make(map[string]bool)
-	fmToFugr := make(map[string]string)
-
-	// Batch TFDIR queries (SAP 255-char IN clause limit)
-	for start := 0; start < len(fmNames); start += 5 {
-		end := start + 5
-		if end > len(fmNames) {
-			end = len(fmNames)
-		}
-		batch := fmNames[start:end]
-		quoted := make([]string, len(batch))
-		for i, n := range batch {
-			quoted[i] = "'" + n + "'"
-		}
-		query := fmt.Sprintf("SELECT FUNCNAME, PNAME FROM TFDIR WHERE FUNCNAME IN (%s)", strings.Join(quoted, ","))
-		result, err := client.RunQuery(ctx, query, len(batch)*2)
-		if err != nil || result == nil {
-			// A module whose group cannot be looked up keeps its node and
-			// loses its containment. It then sits in the graph belonging to
-			// nothing, which a boundary check reads as a crossing that is not
-			// there — or misses one that is.
-			for _, n := range batch {
-				unresolved = append(unresolved, adt.Unsearched{Object: "FUNC " + n, Reason: errText(err)})
-			}
-			continue
-		}
-		for _, row := range result.Rows {
-			funcName := strings.ToUpper(strings.TrimSpace(fmt.Sprintf("%v", row["FUNCNAME"])))
-			pname := strings.ToUpper(strings.TrimSpace(fmt.Sprintf("%v", row["PNAME"])))
-			fugrName := ""
-			if strings.HasPrefix(pname, "SAPL") {
-				fugrName = pname[4:]
-			} else if pname != "" {
-				fugrName = pname
-			}
-			if fugrName != "" {
-				fmToFugr[funcName] = fugrName
-				fugrSet[fugrName] = true
-			}
-		}
-	}
-
-	if len(fugrSet) == 0 {
-		return unresolved
-	}
-
-	// TADIR lookup for the function groups
-	fugrQuoted := make([]string, 0, len(fugrSet))
-	for fg := range fugrSet {
-		fugrQuoted = append(fugrQuoted, "'"+fg+"'")
-	}
-	fugrQuery := fmt.Sprintf("SELECT obj_name, devclass FROM tadir WHERE pgmid = 'R3TR' AND object = 'FUGR' AND obj_name IN (%s)", strings.Join(fugrQuoted, ","))
-	fugrResult, err := client.RunQuery(ctx, fugrQuery, len(fugrSet)*2)
-	if err != nil || fugrResult == nil {
-		// The groups were found and their packages were not. Every module
-		// behind them keeps a group and loses a package, which is the same
-		// unlabelled node reached by a different route.
-		for fg := range fugrSet {
-			unresolved = append(unresolved, adt.Unsearched{Object: "FUGR " + fg, Reason: errText(err)})
-		}
-		return unresolved
-	}
-
-	fugrPkg := make(map[string]string) // FUGR name → DEVCLASS
-	for _, row := range fugrResult.Rows {
-		objName := strings.ToUpper(strings.TrimSpace(fmt.Sprintf("%v", row["OBJ_NAME"])))
-		devclass := strings.ToUpper(strings.TrimSpace(fmt.Sprintf("%v", row["DEVCLASS"])))
-		fugrPkg[objName] = devclass
-	}
-
-	// Update FM nodes: set type to FUNC, package from the FUGR's DEVCLASS
-	for fmName, fugrName := range fmToFugr {
-		if devclass, ok := fugrPkg[fugrName]; ok {
-			if nodes, ok := nodesByName[fmName]; ok {
-				for _, n := range nodes {
-					n.Package = devclass
-					n.Type = "FUNC"
-				}
-			}
-		}
-	}
-	return unresolved
+	return adtsource.ResolvePackages(ctx, s.adtClient, g, nil).FailedLookups()
 }
 
 // handleGraphStats returns statistics about the current in-memory graph.
@@ -555,17 +432,7 @@ func graphFromSource(source, objType, objName string) *graph.Graph {
 	g := graph.New()
 	nodeID := graph.NodeID(objType, objName)
 	g.AddNode(&graph.Node{ID: nodeID, Name: objName, Type: objType})
-
-	edges := graph.ExtractDepsFromSource(source, nodeID)
-	dynEdges := graph.ExtractDynamicCalls(source, nodeID)
-	for _, e := range append(edges, dynEdges...) {
-		g.AddEdge(e)
-		g.AddNode(&graph.Node{
-			ID:   e.To,
-			Name: strings.SplitN(e.To, ":", 2)[1],
-			Type: strings.SplitN(e.To, ":", 2)[0],
-		})
-	}
+	g.AddSourceDeps(nodeID, source)
 	return g
 }
 
@@ -1254,7 +1121,7 @@ func (s *Server) handleWhereUsedConfig(ctx context.Context, request mcp.CallTool
 		Unsearched []adt.Unsearched `json:"unsearched,omitempty"`
 		Notes      []string         `json:"notes,omitempty"`
 	}{ConfigUsageResult: result, Unsearched: gaps}
-	if note := adt.UnsearchedNote(gaps, len(refs)+len(gaps), "object"); note != "" {
+	if note := adtsource.ConfigGapNote(refs, gaps); note != "" {
 		envelope.Notes = append(envelope.Notes, note)
 	}
 
@@ -1329,52 +1196,17 @@ func (s *Server) handleUsageExamples(ctx context.Context, request mcp.CallToolRe
 // was aimed at the wrong column and the wrong thing. Truncating it to 'D' would
 // have compiled and returned dialog modules.
 func (s *Server) fetchConfigRefs(ctx context.Context, variable string, doGrep bool) ([]graph.TVARVCReference, []adt.Unsearched, error) {
-	// Step 1: Find the includes that reference the TVARVC table.
-	type candidate struct {
-		objType string
-		objName string
-	}
-	seen := make(map[string]bool)
-	var candidates []candidate
+	// Step 1: Find the objects whose code touches the TVARVC table.
+	candidates, wbErr, crossErr := adtsource.TVARVCReaders(ctx, s.adtClient)
 	var gaps []adt.Unsearched
 
-	collect := func(label, query string) error {
-		res, err := s.adtClient.RunQuery(ctx, query, 500)
-		if err != nil {
-			return fmt.Errorf("%s: %w", label, err)
-		}
-		if res == nil {
-			return nil
-		}
-		for _, row := range res.Rows {
-			include := strings.TrimSpace(fmt.Sprintf("%v", row["INCLUDE"]))
-			if include == "" {
-				continue
-			}
-			_, objType, objName := graph.NormalizeInclude(include)
-			key := objType + ":" + objName
-			if !seen[key] {
-				seen[key] = true
-				candidates = append(candidates, candidate{objType, objName})
-			}
-		}
-		return nil
-	}
-
-	wbErr := collect("WBCROSSGT", "SELECT INCLUDE FROM WBCROSSGT WHERE OTYPE = 'TY' AND NAME = 'TVARVC'")
-	crossErr := collect("CROSS", "SELECT INCLUDE FROM CROSS WHERE TYPE = 'S' AND NAME = 'TVARVC'")
 	// One source failing is survivable — the other still finds real readers —
 	// but only if the answer admits which half of the system went unasked.
 	// Both failing is not a "no readers" answer at all.
 	if wbErr != nil && crossErr != nil {
 		return nil, nil, fmt.Errorf("neither cross-reference table could be read, so this is not an answer: %v; %v", wbErr, crossErr)
 	}
-	if wbErr != nil {
-		gaps = append(gaps, adt.Unsearched{Object: "WBCROSSGT (object-oriented code)", Reason: wbErr.Error()})
-	}
-	if crossErr != nil {
-		gaps = append(gaps, adt.Unsearched{Object: "CROSS (classic procedural code)", Reason: crossErr.Error()})
-	}
+	gaps = append(gaps, adtsource.TVARVCTableGaps(wbErr, crossErr)...)
 
 	// Step 2: Grep each candidate's source for the variable name
 	var refs []graph.TVARVCReference
@@ -1383,21 +1215,21 @@ func (s *Server) fetchConfigRefs(ctx context.Context, variable string, doGrep bo
 
 		if doGrep {
 			// Build ADT URL for grep
-			objURL := buildADTObjectURL(c.objType, c.objName)
+			objURL := buildADTObjectURL(c.Type, c.Name)
 			if objURL == "" {
 				gaps = append(gaps, adt.Unsearched{
-					Object: c.objType + " " + c.objName,
+					Object: c.Type + " " + c.Name,
 					Reason: "no ADT source URL for this object type, so it was listed unconfirmed rather than grepped",
 				})
 			} else {
 				grepResult, err := s.adtClient.GrepObject(ctx, objURL, variable, true, 0)
-				switch {
-				case err != nil:
-					// Confirmed=false is the same value we would record for an
-					// object we read and did not find the name in. A failed
-					// grep must not borrow that meaning.
-					gaps = append(gaps, adt.Unsearched{Object: c.objType + " " + c.objName, Reason: err.Error()})
-				case grepResult != nil && len(grepResult.Matches) > 0:
+				// Confirmed=false is the same value we would record for an
+				// object we read and did not find the name in. A failed grep
+				// must not borrow that meaning — and GrepObject reports a
+				// source it could not read in its result, not in err.
+				if reason, failed := adtsource.GrepFailure(grepResult, err); failed {
+					gaps = append(gaps, adt.Unsearched{Object: c.Type + " " + c.Name, Reason: reason})
+				} else if len(grepResult.Matches) > 0 {
 					confirmed = true
 				}
 			}
@@ -1405,8 +1237,8 @@ func (s *Server) fetchConfigRefs(ctx context.Context, variable string, doGrep bo
 
 		refs = append(refs, graph.TVARVCReference{
 			VariableName: variable,
-			ObjectType:   c.objType,
-			ObjectName:   c.objName,
+			ObjectType:   c.Type,
+			ObjectName:   c.Name,
 			Confirmed:    confirmed,
 		})
 	}
@@ -1651,6 +1483,10 @@ func usageTypeNameFromURI(uri, fallbackName string) (objType, name, parent strin
 		objType = "INTF"
 	case strings.Contains(lowerURI, "/programs/programs/"):
 		objType = "PROG"
+	case strings.Contains(lowerURI, "/programs/includes/"):
+		// A program include whose main program could not be read. Its own
+		// source is where the reference sits, so it is still worth reading.
+		objType = "INCL"
 	case strings.Contains(lowerURI, "/functions/groups/") && strings.Contains(lowerURI, "/fmodules/"):
 		objType = "FUNC"
 	default:
@@ -1661,13 +1497,22 @@ func usageTypeNameFromURI(uri, fallbackName string) (objType, name, parent strin
 		name = strings.ToUpper(fallbackName)
 	}
 	if objType == "FUNC" {
-		parts := strings.Split(lowerURI, "/")
+		// Segments are unescaped: a namespaced module arrives as
+		// %2fsdf%2fewa_sdccn, and that is not a name GetSource can find.
+		parts := strings.Split(strings.SplitN(lowerURI, "#", 2)[0], "/")
+		segment := func(i int) string {
+			seg := parts[i]
+			if unescaped, err := url.PathUnescape(seg); err == nil {
+				seg = unescaped
+			}
+			return strings.ToUpper(seg)
+		}
 		for i := range parts {
 			if parts[i] == "groups" && i+1 < len(parts) {
-				parent = strings.ToUpper(parts[i+1])
+				parent = segment(i + 1)
 			}
 			if parts[i] == "fmodules" && i+1 < len(parts) {
-				name = strings.ToUpper(parts[i+1])
+				name = segment(i + 1)
 			}
 		}
 	}
@@ -1752,7 +1597,7 @@ func (s *Server) fetchUsageCandidatesFallback(ctx context.Context, target graph.
 
 func (s *Server) fetchUsageCandidateSource(ctx context.Context, cand usageCallerCandidate) (string, error) {
 	switch cand.Type {
-	case "CLAS", "PROG", "INTF":
+	case "CLAS", "PROG", "INTF", "INCL":
 		// Four class sections have an address of their own. Everything else —
 		// CP, CU, CO, CI and every CM### — lives in the main source and must
 		// not be given a path by pattern: ADT answers 404 to an invented one,
@@ -1899,7 +1744,7 @@ func (s *Server) handleLoads(ctx context.Context, request mcp.CallToolRequest) (
 
 	collect := func(rows []adt.LoadRow, g []adt.Unsearched, key string) {
 		gaps = append(gaps, g...)
-		graphOf := graph.BuildD010INCGraph(loadRowsToGraphRows(rows))
+		graphOf := graph.BuildD010INCGraph(adtsource.D010INCRows(rows))
 		edges := graphOf.Edges()
 		out := make([]map[string]any, 0, len(edges))
 		for _, e := range edges {
@@ -1941,20 +1786,4 @@ func (s *Server) handleLoads(ctx context.Context, request mcp.CallToolRequest) (
 		answer["gap"] = adt.UnsearchedNote(gaps, len(gaps), "table")
 	}
 	return newToolResultJSON(answer), nil
-}
-
-// loadRowsToGraphRows converts what the client read into what the builder takes.
-// Two structs rather than one because the client speaks in table columns and the
-// graph speaks in edges, and collapsing them would put SQL vocabulary in the
-// graph package.
-func loadRowsToGraphRows(rows []adt.LoadRow) []graph.D010INCRow {
-	out := make([]graph.D010INCRow, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, graph.D010INCRow{
-			Master:            r.Master,
-			Include:           r.Include,
-			ObsoleteInVersion: r.ObsoleteInVersion,
-		})
-	}
-	return out
 }

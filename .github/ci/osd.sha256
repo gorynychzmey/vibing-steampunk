@@ -1,0 +1,14 @@
+# Expected sha256 of every pinned open-steamgate asset: "<sha256>  <tag>/<asset>".
+# Checked by osd-up.sh before a binary is made executable, in addition to the
+# release's own .sha256. Update together with osd.version / osgo.version:
+#   gh release download <tag> -R oisee/open-steamgate -p 'osd-*' -p 'osgo-*' -D dl
+#   then hash every binary in dl (not the .sha256 files), check each against
+#   its release .sha256, and write the lines below with the new tag.
+af564e999f0c8c4791c5456a0a23c8dd0e6e8d725c9fc75f750fe9d9265ba253  vscode-v0.6.1511/osd-darwin-arm64
+61572584f969c56b85c18749deb95f74481554a66d5cf75c87a518db57d393e9  vscode-v0.6.1511/osd-linux-arm64
+7f147460cf845d2b741920acf233066c6d8492e668cdcd5a9f2dcf7da34dc5de  vscode-v0.6.1511/osd-linux-x64
+7cb01f5f39bd6dbf6878b55a15421c255e4f3e9ba02d644600d99cfedabf3aaa  vscode-v0.6.1511/osd-windows-x64.exe
+1cf7b5eedb59255cb1f94969d7513e6656e9482ed8a5f61bb39baf3556f98dee  vscode-v0.6.1511/osgo-darwin-arm64
+fbab59361483e4c74b10b78da94ccc3923af96c0fbed8dc005526db8d697f7a7  vscode-v0.6.1511/osgo-linux-arm64
+7b855bc0cc6a093724dbdccc3ed1362bb3dd2793a5559b053bdab2095c9a54aa  vscode-v0.6.1511/osgo-linux-x64
+189b1171f48cf38c6eabd5f1480a4400ca2a132ac330d24ead55d5a66c620d0f  vscode-v0.6.1511/osgo-windows-x64.exe

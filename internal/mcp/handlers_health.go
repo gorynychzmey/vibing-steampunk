@@ -10,6 +10,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/graph"
+	"github.com/oisee/vibing-steampunk/pkg/graph/adtsource"
 )
 
 type healthScope struct {
@@ -112,19 +113,8 @@ func (s *Server) collectObjectTests(ctx context.Context, objType, objName string
 	if err != nil {
 		return healthSignal{Status: "ERROR", Details: map[string]any{"message": err.Error()}}
 	}
-	classCount, methodCount, alertCount := summarizeUnitTests(result)
-	status := "PASS"
-	if classCount == 0 {
-		status = "NONE"
-	}
-	if alertCount > 0 {
-		status = "FAIL"
-	}
-	return healthSignal{Status: status, Details: map[string]any{
-		"classes": classCount,
-		"methods": methodCount,
-		"alerts":  alertCount,
-	}}
+	status, details := adtsource.UnitTestVerdict(result)
+	return healthSignal{Status: status, Details: details}
 }
 
 func (s *Server) collectPackageTests(ctx context.Context, pkg string) healthSignal {
@@ -135,7 +125,7 @@ func (s *Server) collectPackageTests(ctx context.Context, pkg string) healthSign
 
 	var testClasses []adt.PackageObject
 	for _, obj := range content.Objects {
-		if strings.ToUpper(obj.Type) == "CLAS" && graph.IsTestCaller(obj.Name, "") {
+		if adtsource.SourceKind(obj.Type) == "CLAS" && graph.IsTestCaller(obj.Name, "") {
 			testClasses = append(testClasses, obj)
 		}
 	}
@@ -163,7 +153,7 @@ func (s *Server) collectPackageTests(ctx context.Context, pkg string) healthSign
 			continue
 		}
 		ran++
-		c, m, a := summarizeUnitTests(result)
+		c, m, a := adtsource.UnitTestCounts(result)
 		totalClasses += c
 		totalMethods += m
 		totalAlerts += a
@@ -214,21 +204,6 @@ func joinNotes(notes ...string) string {
 	return strings.Join(kept, "\n")
 }
 
-func summarizeUnitTests(result *adt.UnitTestResult) (classCount, methodCount, alertCount int) {
-	if result == nil {
-		return 0, 0, 0
-	}
-	classCount = len(result.Classes)
-	for _, c := range result.Classes {
-		methodCount += len(c.TestMethods)
-		alertCount += len(c.Alerts)
-		for _, m := range c.TestMethods {
-			alertCount += len(m.Alerts)
-		}
-	}
-	return classCount, methodCount, alertCount
-}
-
 func (s *Server) collectObjectATC(ctx context.Context, objType, objName string) healthSignal {
 	objectURL := buildHealthObjectURL(objType, objName, "")
 	if objectURL == "" {
@@ -238,17 +213,8 @@ func (s *Server) collectObjectATC(ctx context.Context, objType, objName string) 
 	if err != nil {
 		return healthSignal{Status: "ERROR", Details: map[string]any{"message": err.Error()}}
 	}
-	total, errors, warnings, infos := summarizeATC(result)
-	status := "CLEAN"
-	if total > 0 {
-		status = "FINDINGS"
-	}
-	return healthSignal{Status: status, Details: map[string]any{
-		"findings": total,
-		"errors":   errors,
-		"warnings": warnings,
-		"infos":    infos,
-	}}
+	status, details := adtsource.ATCVerdict(result)
+	return healthSignal{Status: status, Details: details}
 }
 
 func (s *Server) collectPackageATC(ctx context.Context, pkg string) healthSignal {
@@ -257,37 +223,8 @@ func (s *Server) collectPackageATC(ctx context.Context, pkg string) healthSignal
 	if err != nil {
 		return healthSignal{Status: "ERROR", Details: map[string]any{"message": err.Error()}}
 	}
-	total, errors, warnings, infos := summarizeATC(result)
-	status := "CLEAN"
-	if total > 0 {
-		status = "FINDINGS"
-	}
-	return healthSignal{Status: status, Details: map[string]any{
-		"findings": total,
-		"errors":   errors,
-		"warnings": warnings,
-		"infos":    infos,
-	}}
-}
-
-func summarizeATC(result *adt.ATCWorklist) (total, errors, warnings, infos int) {
-	if result == nil {
-		return 0, 0, 0, 0
-	}
-	for _, obj := range result.Objects {
-		total += len(obj.Findings)
-		for _, f := range obj.Findings {
-			switch f.Priority {
-			case 1:
-				errors++
-			case 2:
-				warnings++
-			default:
-				infos++
-			}
-		}
-	}
-	return total, errors, warnings, infos
+	status, details := adtsource.ATCVerdict(result)
+	return healthSignal{Status: status, Details: details}
 }
 
 func (s *Server) collectObjectBoundaries(ctx context.Context, objType, objName, parent string) healthSignal {
@@ -302,15 +239,7 @@ func (s *Server) collectObjectBoundaries(ctx context.Context, objType, objName, 
 	g := graph.New()
 	nodeID := graph.NodeID(objType, objName)
 	g.AddNode(&graph.Node{ID: nodeID, Name: objName, Type: objType})
-	edges := graph.ExtractDepsFromSource(source, nodeID)
-	dynEdges := graph.ExtractDynamicCalls(source, nodeID)
-	for _, e := range append(edges, dynEdges...) {
-		g.AddEdge(e)
-		parts := strings.SplitN(e.To, ":", 2)
-		if len(parts) == 2 {
-			g.AddNode(&graph.Node{ID: e.To, Name: parts[1], Type: parts[0]})
-		}
-	}
+	g.AddSourceDeps(nodeID, source)
 	unresolved := s.resolvePackages(ctx, g)
 	n := g.GetNode(nodeID)
 	if n == nil || n.Package == "" {
@@ -334,49 +263,16 @@ func (s *Server) collectObjectBoundaries(ctx context.Context, objType, objName, 
 }
 
 func (s *Server) collectPackageBoundaries(ctx context.Context, pkg string) healthSignal {
-	g := graph.New()
-	content, err := s.adtClient.GetPackage(ctx, pkg)
+	// The same scan check_boundaries makes. This collector had its own loop,
+	// which took only classes, programs and interfaces and dropped every other
+	// entry without a word — a package of function groups calling across
+	// packages came back with nothing read, or with the classes beside them
+	// read and the groups left out of a verdict that looked complete.
+	scan, err := s.packageGraph(ctx, pkg, 1)
 	if err != nil {
 		return healthSignal{Status: "ERROR", Details: map[string]any{"message": err.Error()}}
 	}
-
-	count := 0
-	skipped := 0
-	var missed []adt.Unsearched
-	for _, obj := range content.Objects {
-		objType := strings.ToUpper(obj.Type)
-		if objType != "CLAS" && objType != "PROG" && objType != "INTF" {
-			continue
-		}
-		if count >= 30 {
-			skipped++
-			continue
-		}
-		source, err := s.adtClient.GetSource(ctx, objType, obj.Name, nil)
-		if err != nil || source == "" {
-			// No source means no edges, and no edges is exactly what a
-			// well-behaved object looks like to CheckBoundaries. Unread code
-			// cannot violate a boundary, so this can only ever undercount.
-			reason := "source came back empty"
-			if err != nil {
-				reason = err.Error()
-			}
-			missed = append(missed, adt.Unsearched{Object: objType + " " + obj.Name, Reason: reason})
-			continue
-		}
-		nodeID := graph.NodeID(objType, obj.Name)
-		g.AddNode(&graph.Node{ID: nodeID, Name: obj.Name, Type: objType, Package: pkg})
-		edges := graph.ExtractDepsFromSource(source, nodeID)
-		dynEdges := graph.ExtractDynamicCalls(source, nodeID)
-		for _, e := range append(edges, dynEdges...) {
-			g.AddEdge(e)
-			parts := strings.SplitN(e.To, ":", 2)
-			if len(parts) == 2 {
-				g.AddNode(&graph.Node{ID: e.To, Name: parts[1], Type: parts[0]})
-			}
-		}
-		count++
-	}
+	g, count, missed, skipped := scan.Graph, scan.Read, scan.Unreadable, scan.Truncated
 	unresolved := s.resolvePackages(ctx, g)
 	report := g.CheckBoundaries(pkg, &graph.BoundaryOptions{IncludeDynamic: true})
 	status := "CLEAN"
@@ -406,7 +302,7 @@ func (s *Server) collectPackageBoundaries(ctx context.Context, pkg string) healt
 	)
 	if skipped > 0 {
 		signal.Note = joinNotes(signal.Note, fmt.Sprintf(
-			"only the first %d source-bearing objects were scanned; %d more were not looked at.", count, skipped))
+			"only the first %d source-bearing objects were scanned; %d more were not looked at.", scan.Cap, skipped))
 	}
 	if count == 0 {
 		signal.Note = joinNotes(signal.Note,
@@ -434,7 +330,7 @@ func (s *Server) collectPackageStaleness(ctx context.Context, pkg string) health
 	attempted := 0
 	var missed []adt.Unsearched
 	for _, obj := range content.Objects {
-		objType := strings.ToUpper(obj.Type)
+		objType := adtsource.SourceKind(obj.Type)
 		if objType != "CLAS" && objType != "PROG" && objType != "INTF" {
 			continue
 		}
@@ -475,31 +371,16 @@ func (s *Server) collectPackageStaleness(ctx context.Context, pkg string) health
 	return signal
 }
 
+// stalenessFromRevisions and stalenessFromTime wrap the shared verdicts in the
+// MCP signal type.
 func stalenessFromRevisions(revs []adt.Revision) healthSignal {
-	if len(revs) == 0 {
-		return healthSignal{Status: "UNKNOWN"}
-	}
-	tm, err := time.Parse(time.RFC3339, revs[0].Date)
-	if err != nil {
-		return healthSignal{Status: "ERROR", Details: map[string]any{"message": err.Error()}}
-	}
-	return stalenessFromTime(tm, 1)
+	status, details := adtsource.RevisionsVerdict(revs)
+	return healthSignal{Status: status, Details: details}
 }
 
 func stalenessFromTime(tm time.Time, checked int) healthSignal {
-	ageDays := int(time.Since(tm).Hours() / 24)
-	status := "ACTIVE"
-	switch {
-	case ageDays > 365:
-		status = "STALE"
-	case ageDays > 90:
-		status = "AGING"
-	}
-	return healthSignal{Status: status, Details: map[string]any{
-		"last_changed": tm.Format(time.RFC3339),
-		"age_days":     ageDays,
-		"checked":      checked,
-	}}
+	status, details := adtsource.StalenessVerdict(tm, checked)
+	return healthSignal{Status: status, Details: details}
 }
 
 func summarizeHealth(signals map[string]healthSignal) healthSummary {

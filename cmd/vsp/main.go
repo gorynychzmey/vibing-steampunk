@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,7 +45,7 @@ Two modes of operation:
 
   MCP Server (default)  Connects Claude, Gemini CLI, Copilot, Codex, Qwen Code,
                         and other MCP-compatible agents to SAP systems.
-                        100 tools (focused), 151 (expert), or 1 universal tool (hyperfocused).
+                        98 tools (focused), 148 (expert), or 1 universal tool (hyperfocused).
 
   CLI Mode              Direct terminal access: search, source, export, debug.
                         Multi-system profiles. Useful for scripts and pipelines.
@@ -140,6 +142,9 @@ func init() {
 	// Session keep-alive
 	rootCmd.Flags().Duration("keepalive", 0, "Session keep-alive interval (e.g., 60s, 5m). Prevents session timeout during idle periods. 0 = disabled (default; see #168)")
 
+	// Long calls
+	rootCmd.Flags().Int("call-timeout", 0, "Default budget in seconds of one long MCP call (ExecuteABAP, ABAP Unit, deploy, source write, activation) that names no params.timeout; at most 3600. 0 = none: each request to SAP is limited to 60s. A negative value is a startup error")
+
 	// Safety options
 	rootCmd.Flags().BoolVar(&cfg.ReadOnly, "read-only", false, "Block all write operations (create, update, delete, activate)")
 	rootCmd.Flags().BoolVar(&cfg.BlockFreeSQL, "block-free-sql", false, "Block execution of arbitrary SQL queries via RunQuery")
@@ -159,7 +164,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.TransportChoice, "transport-choice", "auto", "A write with no transport named: auto picks the object's own or an open request of yours that fits (and creates one with --enable-transports); off leaves it to SAP, which generates a request per write")
 
 	// Mode options
-	rootCmd.Flags().StringVar(&cfg.Mode, "mode", "hyperfocused", "Tool mode: hyperfocused (single universal SAP tool), focused (100 tools), or expert (151 tools)")
+	rootCmd.Flags().StringVar(&cfg.Mode, "mode", "hyperfocused", "Tool mode: hyperfocused (single universal SAP tool), focused (98 tools), or expert (148 tools)")
 	rootCmd.Flags().StringVar(&cfg.DisabledGroups, "disabled-groups", "", "Disable tool groups: 5/U=UI5, T=Tests, H=HANA, D=Debug, GC=gCTS, N=i18n")
 
 	// Transport options
@@ -243,6 +248,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err := validateConfig(); err != nil {
 		return err
 	}
+
+	// Long-call budget of the MCP server: flag > SAP_CALL_TIMEOUT env
+	callTimeout, err := resolveCallTimeout(cmd)
+	if err != nil {
+		return err
+	}
+	cfg.CallTimeout = callTimeout
 
 	// Browser-based SSO authentication (must run before processCookieAuth)
 	if err := processBrowserAuth(cmd); err != nil {
@@ -342,16 +354,27 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// Create and start MCP server
 	srv := mcp.NewServer(cfg)
 
-	switch cfg.Transport {
-	case "http":
-		addr := cfg.HTTPAddr
-		if cfg.Verbose {
-			fmt.Fprintf(os.Stderr, "[VERBOSE] Transport: Streamable HTTP on %s\n", addr)
+	return serveMCP(cmd, func() error {
+		switch cfg.Transport {
+		case "http":
+			addr := cfg.HTTPAddr
+			if cfg.Verbose {
+				fmt.Fprintf(os.Stderr, "[VERBOSE] Transport: Streamable HTTP on %s\n", addr)
+			}
+			return srv.ServeHTTP(addr)
+		default:
+			return srv.ServeStdio()
 		}
-		return srv.ServeHTTP(addr)
-	default:
-		return srv.ServeStdio()
-	}
+	})
+}
+
+// serveMCP runs the server once the command line is known to be good. From
+// here on an error is the server's, not the caller's spelling of a flag, so
+// cobra must not answer it with the usage text: an MCP client reads stderr as
+// the server's log, and a shutdown used to fill it with every flag vsp has.
+func serveMCP(cmd *cobra.Command, serve func() error) error {
+	cmd.SilenceUsage = true
+	return serve()
 }
 
 // warnNamedSystemMismatch says at startup when the system named by -s /
@@ -572,6 +595,58 @@ func resolveConfig(cmd *cobra.Command) {
 	} else {
 		cfg.KeepAliveInterval, _ = cmd.Flags().GetDuration("keepalive")
 	}
+}
+
+// resolveCallTimeout reads --call-timeout, else SAP_CALL_TIMEOUT: seconds
+// (the env also takes a Go duration such as 5m). 0, or nothing set, means no
+// budget of the server's own. Anything else that is not at least one second
+// is an error, not a silent "no budget": a typo would otherwise take the limit
+// the operator meant to set away without a word. Capped at MaxCallTimeout.
+func resolveCallTimeout(cmd *cobra.Command) (time.Duration, error) {
+	var d time.Duration
+	var source string
+	if cmd.Flags().Changed("call-timeout") {
+		secs, err := cmd.Flags().GetInt("call-timeout")
+		if err != nil {
+			return 0, fmt.Errorf("--call-timeout: %w", err)
+		}
+		source = fmt.Sprintf("--call-timeout %d", secs)
+		if secs < 0 {
+			return 0, fmt.Errorf("%s: must be a number of seconds, at least 1 (0 for none)", source)
+		}
+		if secs > int(mcp.MaxCallTimeout/time.Second) {
+			return mcp.MaxCallTimeout, nil
+		}
+		d = time.Duration(secs) * time.Second
+	} else if v := strings.TrimSpace(viper.GetString("CALL_TIMEOUT")); v != "" {
+		source = fmt.Sprintf("SAP_CALL_TIMEOUT=%q", v)
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			if math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
+				return 0, fmt.Errorf("%s: must be a number of seconds, at least 1 (0 for none)", source)
+			}
+			if f > mcp.MaxCallTimeout.Seconds() {
+				return mcp.MaxCallTimeout, nil
+			}
+			d = time.Duration(f * float64(time.Second))
+		} else if pd, err := time.ParseDuration(v); err == nil {
+			if pd < 0 {
+				return 0, fmt.Errorf("%s: must not be negative", source)
+			}
+			d = pd
+		} else {
+			return 0, fmt.Errorf("%s: not a number of seconds or a duration such as 5m", source)
+		}
+	}
+	if d == 0 {
+		return 0, nil
+	}
+	if d < time.Second {
+		return 0, fmt.Errorf("%s: below 1s; give at least one second, or 0 for none", source)
+	}
+	if d > mcp.MaxCallTimeout {
+		d = mcp.MaxCallTimeout
+	}
+	return d, nil
 }
 
 func validateConfig() error {

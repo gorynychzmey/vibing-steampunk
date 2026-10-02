@@ -22,8 +22,16 @@ go test -v ./pkg/cache/
 # Integration tests (require live SAP system via SAP_* env vars)
 go test -tags=integration -v ./pkg/adt/
 
-# Lint (golangci-lint with .golangci.yml config)
+# Lint: the CI gate. Correctness linters, issues new since origin/main only
+# (.golangci.yml). CI pins golangci-lint v2.13.2 and runs it fail-closed with a
+# canary: ./.github/ci/lint.sh gate
 golangci-lint run ./...
+
+# Lint debt over the whole tree, advisory (.github/ci/golangci-full.yml)
+./.github/ci/lint.sh full
+
+# Size and complexity metrics, as the PR report shows them
+make metrics
 
 # Format (gofumpt preferred, falls back to go fmt)
 gofumpt -w .
@@ -114,4 +122,4 @@ Handlers return `(result, nil)` — never `(nil, error)`. Errors go through `mcp
 - **Integration tests** use build tag `integration` and require `SAP_URL`, `SAP_USER`, `SAP_PASSWORD`, `SAP_CLIENT` env vars. They create objects in the `$TMP` package and clean up after themselves.
 - **Never commit** `.env`, `cookies.txt`, or `.mcp.json` — all are in `.gitignore`.
 - **Reports** follow the naming convention `reports/YYYY-MM-DD-NNN-title.md` with sequential numbering per day.
-- **Releases** use GoReleaser (`.goreleaser.yml`) with git-cliff changelogs (`cliff.toml`), triggered via the `Release` workflow dispatch.
+- **Releases** are cut by pushing a `vX.Y.Z` tag: `.github/workflows/release.yml` builds and verifies through `.github/ci/release.sh` and publishes. Notes come from the README "What's New" section, else git-cliff (`cliff.toml`). See `.claude/commands/celebrate.md`.

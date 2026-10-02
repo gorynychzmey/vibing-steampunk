@@ -563,7 +563,7 @@ ABAP-callable function module, and let vsp generate the ABAP proxy.
 
 Applied to vsp, the idea is genuinely new: **an ABAP program calls out to vsp**,
 and vsp answers with something ABAP cannot compute — an LLM completion, an
-abaplint run (vsp embeds `abaplint-lexer.zip`), a graph query, a Lua script.
+abaplint run (vsp's Go port in `pkg/abaplint`), a graph query, a Lua script.
 `Z_VSP_LINT(source) → findings`, `Z_VSP_ASK(prompt) → answer`, evaluated in Go.
 It inverts the whole tool: instead of an AI driving SAP, SAP consults the AI.
 
@@ -676,12 +676,12 @@ primitive), **`RFC_READ_TABLE` as SQL** (no joins), **per-FM MCP tools in vsp**
 ## 15. The first prototype — exact commands
 
 Everything below except the two marked ⚠️ was **run today** against A4H
-(`192.168.8.105`, gateway `3300`, client `001`, sysnr `00`). Credentials come
+(`<lan-ip>`, gateway `3300`, client `001`, sysnr `00`). Credentials come
 from `.vsp.json` / `SAP_USER`+`SAP_PASSWORD`; none appear here.
 
 ```bash
 # 0 — reachability and identity (baseline; 2 s)
-nc -z 192.168.8.105 3300
+nc -z <lan-ip> 3300
 vsp rfc info                     # ✅ A4H / 758 / kernel 793 / HDB / cp 4103
 
 # 1 — is abapGit's RFC serializer here, and is it the dev version?

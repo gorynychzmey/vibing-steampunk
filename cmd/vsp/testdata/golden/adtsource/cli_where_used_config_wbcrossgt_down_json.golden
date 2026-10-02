@@ -1,0 +1,50 @@
+=== stdout
+{
+  "variable": "TVARVC:ZGOLD_VAR",
+  "variable_name": "ZGOLD_VAR",
+  "found": true,
+  "readers": [
+    {
+      "node_id": "PROG:ZGOLD_REPORT",
+      "name": "ZGOLD_REPORT",
+      "type": "PROG",
+      "confidence": "HIGH",
+      "edge_count": 1
+    },
+    {
+      "node_id": "PROG:ZGOLD_MISSING",
+      "name": "ZGOLD_MISSING",
+      "type": "PROG",
+      "confidence": "MEDIUM",
+      "edge_count": 1
+    }
+  ],
+  "unsearched": [
+    {
+      "object": "WBCROSSGT (object-oriented code)",
+      "reason": "WBCROSSGT: running query: ADT API error: status 500 at /sap/bc/adt/datapreview/freestyle: Data preview refused this query"
+    },
+    {
+      "object": "PROG ZGOLD_MISSING",
+      "reason": "Failed to read source: ADT API error: status 404 at /sap/bc/adt/programs/programs/zgold_missing/source/main: Resource does not exist"
+    }
+  ],
+  "notes": [
+    "2 of 3 objects could not be searched, so this is not a complete answer:\n  WBCROSSGT (object-oriented code): WBCROSSGT: running query: ADT API error: status 500 at /sap/bc/adt/datapreview/freestyle: Data preview refused this query\n  PROG ZGOLD_MISSING: Failed to read source: ADT API error: status 404 at /sap/bc/adt/programs/programs/zgold_missing/source/main: Resource does not exist"
+  ]
+}
+
+=== stderr
+Querying WBCROSSGT and CROSS for TVARVC references...
+WARN: object-oriented callers were not searched: WBCROSSGT: running query: ADT API error: status 500 at /sap/bc/adt/datapreview/freestyle: Data preview refused this query
+Found 2 candidate programs. Grep confirmed 1.
+WARN: PROG ZGOLD_MISSING could not be grepped: Failed to read source: ADT API error: status 404 at /sap/bc/adt/programs/programs/zgold_missing/source/main: Resource does not exist
+WARN: 1 of 2 candidates could not be grepped, so an unconfirmed row below may only mean unread.
+
+=== error
+<nil>
+=== requests
+GET /sap/bc/adt/programs/programs/zgold_missing/source/main
+GET /sap/bc/adt/programs/programs/zgold_report/source/main
+SQL SELECT INCLUDE FROM CROSS WHERE TYPE = 'S' AND NAME = 'TVARVC'
+SQL SELECT INCLUDE FROM WBCROSSGT WHERE OTYPE = 'TY' AND NAME = 'TVARVC'
