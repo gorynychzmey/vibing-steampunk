@@ -153,7 +153,7 @@ type Config struct {
 	ReauthTimeout time.Duration
 
 	// CallTimeout is the default budget of one long call (ExecuteABAP, ABAP
-	// Unit, a deploy) when the call names none in params.timeout. Zero leaves
+	// Unit, a deploy, a source write, an activation) when the call names none in params.timeout. Zero leaves
 	// each request to SAP bounded by the client's per-request timeout only.
 	CallTimeout time.Duration
 
@@ -531,7 +531,7 @@ func (s *Server) requireActiveAMDPSession() *mcp.CallToolResult {
 // - handlers_ui5.go: UI5ListApps, UI5GetApp, etc.
 // - handlers_git.go: GitTypes, GitExport
 // - handlers_report.go: RunReport, GetVariants, etc.
-// - handlers_install.go: InstallZADTVSP, InstallAbapGit, etc.
+// - handlers_install.go: InstallZADTVSP, ListDependencies, DeployZip
 // - handlers_transport.go: ListTransports, GetTransport, etc.
 //
 // Tool registration is in:

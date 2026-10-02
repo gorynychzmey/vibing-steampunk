@@ -1052,7 +1052,62 @@ Earlier: **[Still Only 5%](articles/2026-08-25-still-five-percent.md)** · **[VS
 
 ## What's New
 
-The headline changes are in the **"New in the last three releases"** callout at the top of this README; the full version history is in [CHANGELOG.md](CHANGELOG.md). Latest release: **[v2.59.0 — only what you saw](https://github.com/oisee/vibing-steampunk/releases/tag/v2.59.0)**.
+The headline changes are in the **"New in the last three releases"** callout at the top of this README; the full version history is in [CHANGELOG.md](CHANGELOG.md). Latest release: **[v2.59.1 — built by CI](https://github.com/oisee/vibing-steampunk/releases/tag/v2.59.1)**.
+
+### v2.60.0 — upcoming
+
+**Moved out:** the ABAP transpilers (`vsp compile`) now live in [ABAPiti](https://github.com/oisee/abapiti).
+
+### v2.59.1 — new since v2.59.0
+
+The first release built, checked and published by CI on the tag push
+(`.github/workflows/release.yml`), not by hand.
+
+**Release assets fixed**
+
+- **`vsp-linux-amd64` is static again.** v2.59.0's needed glibc 2.34 or later.
+  Every binary is now built with `CGO_ENABLED=0`.
+- **`LICENSE` and `NOTICE` ship with the binaries.** Apache-2.0 components are
+  embedded.
+- **The build info names the release commit.** CI refuses a binary whose Go
+  VCS stamp is not the tag's commit or comes from a modified tree. It runs
+  `--version` on Linux, macOS and Windows (x64 and ARM), and publishes only
+  after downloading the draft back and comparing it byte for byte (#329).
+
+**New**
+
+- **Has a transport been imported here, and how did it go?** MCP `system`
+  `import_status` reads a request's tp steps from TPALOG, read-only (#332,
+  ported from #297).
+- **Activation failures say why.** `vsp install`, `copy`, `source write` and
+  `source edit` print the activation messages: object, line and text,
+  capped at 20 (#333).
+- **Long writes take the call timeout.** WriteSource, EditSource and the
+  activations honour `--call-timeout` / `params.timeout`, so a large program
+  is no longer cut at 60 s. A lock taken before the time ran out is still
+  released. If vsp cannot confirm the release, it says the lock may still
+  be held (#333).
+
+**Fixed**
+
+- **Deleting or updating with your own lock handle on SAP_BASIS 816.** The
+  package check now runs inside that lock's session, so the write no longer
+  comes back 423 (#331, ported from #292).
+- **No false "package does not exist".** The check before a create read
+  "404" anywhere in an error, including a port number in its URL, so a
+  timeout could be reported as a missing package (#338).
+
+**Removed**
+
+- **Three MCP tools that did nothing useful.** `InstallAbapGit` deployed
+  nothing but reported success, `InstallDummyTest` was a test tool, and
+  `WriteDataElementLabels` always refused. abapGit's standalone edition still
+  installs with `vsp install abapgit --edition standalone` (#334, #277).
+
+**Coming in the next release: fewer platforms.** `vsp-linux-386`,
+`vsp-linux-arm` and `vsp-windows-386` will no longer be built. Together they
+were about 6% of downloads. The remaining six are linux, macOS and Windows,
+each on amd64 and arm64.
 
 ### v2.59.0 — new since v2.58.0
 
@@ -1196,7 +1251,7 @@ must rewrite `Host` to reach vsp over HTTP.
 
 ### Hyperfocused Mode — 1 Tool to Rule Them All (Recommended)
 
-**Recommended for most setups.** Single `SAP(action, target, params)` tool covers most of what the 151 individual tools do — gCTS, revision history and i18n still need `--mode expert`. The same tool is now registered in focused and expert too, so an agent in either can reach the `analyze` surface. Minimal token overhead, maximum capability.
+**Recommended for most setups.** Single `SAP(action, target, params)` tool covers most of what the 148 individual tools do — gCTS, revision history and i18n still need `--mode expert`. The same tool is now registered in focused and expert too, so an agent in either can reach the `analyze` surface. Minimal token overhead, maximum capability.
 
 ```
 SAP(action="read",   target="CLAS ZCL_TRAVEL")
@@ -1205,7 +1260,7 @@ SAP(action="create", target="DEVC", params={"name": "$ZOZIK", "description": "Ne
 SAP(action="help",   target="debug")
 ```
 
-| Metric | Focused (100 tools) | Expert (151 tools) | Hyperfocused (1 tool) |
+| Metric | Focused (98 tools) | Expert (148 tools) | Hyperfocused (1 tool) |
 |--------|-------------------:|-------------------:|----------------------:|
 | MCP schema tokens | ~14,000 | ~40,000 | **~200** |
 | Reduction | — | — | **99.5%** |
@@ -1314,33 +1369,13 @@ Zero dependencies, zero FFI. Pure Go, ~3.5M tokens/sec, ready for lint rules in 
 
 See [LSP setup](#abap-lsp-for-claude-code) for configuration.
 
-### WASM-to-ABAP Compiler (Research)
+### ABAP Transpilers — Moved to ABAPiti
 
-Compile WebAssembly binaries to native ABAP — advanced prototype, verified on selected corpora. Three paths:
-
-```
-.wasm binary → pkg/wasmcomp (Go)  → ABAP source files     ← AOT compiler
-.ts source   → pkg/ts2abap (Go)   → clean OO ABAP classes  ← direct transpiler
-.wasm binary → zcl_wasm_compiler  → ABAP (on SAP itself!)  ← self-hosting, 785 lines
-```
-
-**Demonstrated on SAP A4H:** QuickJS (1,410 functions) compiled to 101K lines ABAP. abaplint parser (26.5MB) compiled to 396K lines. Self-hosting compiler parses WASM, generates ABAP, and executes via `GENERATE SUBROUTINE POOL` — all within SAP. This is research/prototype work, not a production-ready toolchain.
-
-| What | Size | Status |
-|------|:----:|:------:|
-| QuickJS → ABAP | 101K lines | Compiled |
-| abaplint → ABAP | 396K lines | Compiled |
-| abaplint lexer (TS→ABAP) | 495 lines | Running on SAP |
-| Self-hosting compiler | 785 lines | Running on SAP |
-| Batch deploy | `vsp deploy *.clas.abap` | 40 classes, 0 failures |
-
-> *On main: `pkg/wasmcomp/` and `embedded/abap/wasm_compiler/`. The original
-> branch `feat/wasm-abap` is kept for history. See
-> [reports/2026-03-20-001](reports/2026-03-20-001-wasm-abap-achievement.md).*
+The WASM/TypeScript/LLVM-to-ABAP transpilers (formerly `vsp compile`) now live in their own repo, **[ABAPiti](https://github.com/oisee/abapiti)**, with their history.
 
 ### Full CLI Toolchain — SAP from the Terminal
 
-35+ commands. No SAP GUI, no Eclipse, no IDE. Most work with standard ADT; `lint`/`parse`/`compile` work fully offline.
+35+ commands. No SAP GUI, no Eclipse, no IDE. Most work with standard ADT; `lint`/`parse` work fully offline.
 
 ```bash
 # Package analysis
@@ -1405,7 +1440,6 @@ vsp install zadt-vsp                             # install ZADT_VSP handler
 # Offline tools
 vsp lint --file myclass.clas.abap                # offline ABAP linter
 vsp parse --stdin --format json < source.abap    # ABAP parser
-vsp compile wasm program.wasm --class ZCL_DEMO   # WASM→ABAP compiler
 ```
 
 See **[CLI Guide](docs/cli-guide.md)** for the complete reference with feature requirements matrix.
@@ -1430,7 +1464,7 @@ See **[CLI Guide](docs/cli-guide.md)** for the complete reference with feature r
 | **API Surface** | `vsp api-surface` — Clean Core inventory: which standard APIs does your code use? |
 | **Graph Export** | 7 formats: mermaid, HTML, DOT (Graphviz), PlantUML, GraphML (Gephi), JSON, MD |
 | **Static Analysis** | `vsp analyze` — 13 lint rules in pure Go, no external dependencies |
-| **Hyperfocused Mode** | 1 universal SAP tool, **~200 tokens** vs ~40K for 151 tools |
+| **Hyperfocused Mode** | 1 universal SAP tool, **~200 tokens** vs ~40K for 148 tools |
 | **Context Compression** | Auto-compressed dependency contracts — 7–30x compression, built-in ABAP parser |
 | **Method-Level Surgery** | Read/edit individual methods — 95% token reduction vs full-class round-trips |
 | **ABAP LSP** | Built-in Language Server — real-time diagnostics, go-to-definition, context push |
@@ -1605,7 +1639,6 @@ vsp -s a4h export '$ZORK' '$ZLLM' -o packages.zip # export abapGit ZIP
 # Bootstrap SAP system (no SAP GUI needed)
 vsp -s a4h install abapgit                        # install abapGit
 vsp -s a4h install zadt-vsp                       # install ZADT_VSP handler
-vsp -s a4h install abapgit --edition full         # full dev edition (576 objects)
 vsp -s a4h install list                           # show installable components
 
 # Transport management
@@ -1764,7 +1797,7 @@ recovery down with it.
 vsp --url https://host:44300 --user admin --password secret
 vsp --url https://host:44300 --cookie-file cookies.txt
 vsp --url https://host:44300 --sso --sso-system dev   # browser SSO, self-refreshing
-vsp --mode expert          # Enable all 151 tools
+vsp --mode expert          # Enable all 148 tools
 vsp --mode hyperfocused    # Single SAP tool (~200 tokens instead of ~40K)
 ```
 
@@ -1825,7 +1858,7 @@ SAP_PASSWORD=secret
 | `--allow-transportable-edits` | `SAP_ALLOW_TRANSPORTABLE_EDITS` | Enable editing transportable objects |
 | `--allowed-transports` | `SAP_ALLOWED_TRANSPORTS` | Whitelist transports (wildcards: `A4HK*`) |
 | `--allowed-packages` | `SAP_ALLOWED_PACKAGES` | Whitelist packages (wildcards: `Z*,$TMP`) |
-| `--call-timeout` | `SAP_CALL_TIMEOUT` | Default budget in seconds of one long MCP call (ExecuteABAP, ABAP Unit, deploy) without its own `params.timeout`; 1–3600, 0 = none (each SAP request then limited to 60s). An invalid value stops startup |
+| `--call-timeout` | `SAP_CALL_TIMEOUT` | Default budget in seconds of one long MCP call (ExecuteABAP, ABAP Unit, deploy, source write, activation) without its own `params.timeout`; 1–3600, 0 = none (each SAP request then limited to 60s). An invalid value stops startup |
 
 </details>
 
@@ -1963,7 +1996,7 @@ One axis, three values — `--mode` or `SAP_MODE`:
 
 ```mermaid
 graph LR
-    F["focused<br/>100 tools<br/>~14K tokens"] --> E["expert<br/>151 tools<br/>~40K tokens"]
+    F["focused<br/>98 tools<br/>~14K tokens"] --> E["expert<br/>148 tools<br/>~40K tokens"]
     E --> H["hyperfocused<br/>1 tool<br/>~200 tokens<br/><i>recommended</i>"]
     style H fill:#2d6a4f,color:#fff,stroke:#4ade80,stroke-width:2px
     style F fill:#264653,color:#fff
@@ -1972,7 +2005,7 @@ graph LR
 
 | Aspect | Focused | Expert | Hyperfocused (recommended) |
 |--------|:-:|:-:|:-:|
-| **Tools** | 100 essential | 151 complete | 1 universal `SAP()` |
+| **Tools** | 98 essential | 148 complete | 1 universal `SAP()` |
 | **Schema tokens** | ~14K | ~40K | **~200** |
 | **How AI calls it** | `GetSource(type, name)` | Same, + granular tools | `SAP(action, target, params)` |
 | **Documentation** | In tool schemas | In tool schemas | `SAP(action="help")` |
@@ -1981,8 +2014,8 @@ graph LR
 
 ```bash
 vsp --mode hyperfocused  # recommended — single SAP(action, target, params) tool
-vsp --mode focused       # 100 curated tools (individual tool names)
-vsp --mode expert        # all 151 tools individually
+vsp --mode focused       # 98 curated tools (individual tool names)
+vsp --mode expert        # all 148 tools individually
 ```
 
 ## DSL & Automation
@@ -2253,7 +2286,7 @@ See [AI-Powered RCA Workflows](reports/2025-12-05-013-ai-powered-rca-workflows.m
 
 ## Tools Reference
 
-**Focused Mode Tools (100):**
+**Focused Mode Tools (98):**
 - **Search:** SearchObject, GrepObjects, GrepPackages
 - **Read:** GetSource, GetTable, GetTableContents, RunQuery, GetPackage, GetFunctionGroup, GetCDSDependencies
 - **Debugger:** DebuggerListen, DebuggerAttach, DebuggerDetach, DebuggerStep, DebuggerGetStack, DebuggerGetVariables, SetBreakpoint, GetBreakpoints, DeleteBreakpoint
@@ -2270,7 +2303,7 @@ See [AI-Powered RCA Workflows](reports/2025-12-05-013-ai-powered-rca-workflows.m
 - **Diagnostics:** GetDumps, GetDump, ListTraces, GetTrace, GetSQLTraceState, ListSQLTraces
 - **Git:** GitTypes, GitExport (requires abapGit on SAP)
 - **Reports:** RunReport, GetVariants, GetTextElements, SetTextElements
-- **Install:** InstallZADTVSP, InstallAbapGit, ListDependencies
+- **Install:** InstallZADTVSP, ListDependencies, DeployZip (abapGit install is CLI-only for now: `vsp install abapgit`; the MCP tool is being rebuilt, #277)
 
 See [README_TOOLS.md](README_TOOLS.md) for complete tool documentation.
 
@@ -2313,7 +2346,7 @@ See [README_TOOLS.md](README_TOOLS.md) for complete tool documentation.
 
 **vsp** is a Go rewrite with:
 - Single binary, zero dependencies
-- 151 tools (vs 13 original)
+- 148 tools (vs 13 original)
 - ~50x faster startup
 
 ## Optional: WebSocket Handler (ZADT_VSP)
@@ -2353,7 +2386,7 @@ See [WebSocket Handler Report](reports/2025-12-18-002-websocket-rfc-handler.md) 
 | Document | Description |
 |----------|-------------|
 | [docs/architecture.md](docs/architecture.md) | Architecture diagrams (Mermaid) |
-| [README_TOOLS.md](README_TOOLS.md) | Complete tool reference (151 tools) |
+| [README_TOOLS.md](README_TOOLS.md) | Complete tool reference (148 tools) |
 | [MCP_USAGE.md](MCP_USAGE.md) | AI agent usage guide |
 | [docs/DSL.md](docs/DSL.md) | DSL & workflow documentation |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Technical architecture (detailed) |
@@ -2484,7 +2517,7 @@ vibing-steampunk/
 
 | Metric | Value |
 |--------|-------|
-| **Tools** | 151 expert, 100 focused, 1 universal |
+| **Tools** | 148 expert, 98 focused, 1 universal |
 | **Unit Tests** | 1354 (`go test ./... -list '.*'`; integration tests excluded by build tag) |
 | **Platforms** | 9 (Linux, macOS, Windows × amd64/arm64/386) |
 

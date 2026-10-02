@@ -167,6 +167,10 @@
           "object_url": {
             "description": "ADT URL of the object (e.g., /sap/bc/adt/programs/programs/ZTEST)",
             "type": "string"
+          },
+          "timeout": {
+            "description": "Seconds this call may take in all (default: the server's --call-timeout; without one, each request to SAP is limited to 60s). When it runs out the call returns a timeout message; the work may still be running on SAP.",
+            "type": "number"
           }
         },
         "required": [
@@ -193,6 +197,10 @@
           "objects": {
             "description": "Objects to activate. Each item can be:\n  - {\"url\": \"/sap/bc/adt/programs/programs/zprog\", \"name\": \"ZPROG\"}\n  - \"TYPE NAME\" shorthand, e.g. \"PROG ZPROG\", \"INCL ZPROG_TOP\", \"CLAS ZCL_X\"",
             "type": "array"
+          },
+          "timeout": {
+            "description": "Seconds this call may take in all (default: the server's --call-timeout; without one, each request to SAP is limited to 60s). When it runs out the call returns a timeout message; the work may still be running on SAP.",
+            "type": "number"
           }
         },
         "required": [
@@ -222,6 +230,10 @@
           "package": {
             "description": "Package name to filter (optional, empty = all packages)",
             "type": "string"
+          },
+          "timeout": {
+            "description": "Seconds this call may take in all (default: the server's --call-timeout; without one, each request to SAP is limited to 60s). When it runs out the call returns a timeout message; the work may still be running on SAP.",
+            "type": "number"
           }
         },
         "required": [],
@@ -1476,6 +1488,10 @@
           "syntax_check": {
             "description": "If true (default), validate syntax before saving. If syntax errors found, changes are NOT saved. Default: true",
             "type": "boolean"
+          },
+          "timeout": {
+            "description": "Seconds this call may take in all (default: the server's --call-timeout; without one, each request to SAP is limited to 60s). When it runs out the call returns a timeout message; the work may still be running on SAP.",
+            "type": "number"
           },
           "transport": {
             "description": "Transport request number (required for objects not in $TMP package)",
@@ -3458,64 +3474,6 @@
         "idempotentHint": false,
         "openWorldHint": true
       },
-      "description": "Deploy abapGit to SAP system from embedded ZIP. Supports standalone (single program) or developer edition (full package structure). Parses abapGit-format ZIP and deploys via WriteSource.",
-      "inputSchema": {
-        "properties": {
-          "check_only": {
-            "description": "Only check prerequisites and show deployment plan without deploying (default: false)",
-            "type": "boolean"
-          },
-          "edition": {
-            "description": "Edition to install: 'standalone' (single program ZABAPGIT) or 'dev' (full $ZGIT_DEV packages). Default: standalone",
-            "type": "string"
-          },
-          "package": {
-            "description": "Target package name. Default: $ABAPGIT for standalone, $ZGIT_DEV for dev edition",
-            "type": "string"
-          }
-        },
-        "required": [],
-        "type": "object"
-      },
-      "name": "InstallAbapGit"
-    },
-    "handler": "github.com/oisee/vibing-steampunk/internal/mcp.(*Server).handleInstallAbapGit-fm"
-  },
-  {
-    "tool": {
-      "annotations": {
-        "readOnlyHint": false,
-        "destructiveHint": true,
-        "idempotentHint": false,
-        "openWorldHint": true
-      },
-      "description": "Test tool that creates a simple interface and class to verify the Install* workflow (create, lock, update, unlock, activate, verify). Uses package $ZADT_INSTALL_TEST.",
-      "inputSchema": {
-        "properties": {
-          "check_only": {
-            "description": "Only check prerequisites without deploying (default: false)",
-            "type": "boolean"
-          },
-          "cleanup": {
-            "description": "Delete test objects after verification (default: false)",
-            "type": "boolean"
-          }
-        },
-        "required": [],
-        "type": "object"
-      },
-      "name": "InstallDummyTest"
-    },
-    "handler": "github.com/oisee/vibing-steampunk/internal/mcp.(*Server).handleInstallDummyTest-fm"
-  },
-  {
-    "tool": {
-      "annotations": {
-        "readOnlyHint": false,
-        "destructiveHint": true,
-        "idempotentHint": false,
-        "openWorldHint": true
-      },
       "description": "Deploy ZADT_VSP WebSocket handler to SAP system. Creates package and deploys 6 ABAP objects (interface + 5 classes) that enable WebSocket debugging, RFC calls, and abapGit export. After deployment, manual SAPC and SICF setup is required.",
       "inputSchema": {
         "properties": {
@@ -3547,7 +3505,7 @@
         "idempotentHint": false,
         "openWorldHint": true
       },
-      "description": "List available dependency packages that can be installed via InstallAbapGit. Shows abapGit editions and other optional dependencies.",
+      "description": "List embedded dependency packages (abapGit editions and other optional dependencies) and whether each is available for DeployZip or `vsp install abapgit`.",
       "inputSchema": {
         "properties": {},
         "required": [],
@@ -4818,60 +4776,6 @@
         "idempotentHint": false,
         "openWorldHint": true
       },
-      "description": "Update data element labels (short/medium/long/heading) in a specific language. Requires a lock handle from LockObject.",
-      "inputSchema": {
-        "properties": {
-          "heading": {
-            "description": "Column heading (max 55 chars)",
-            "type": "string"
-          },
-          "language": {
-            "description": "ISO language code (e.g., EN, DE, FR)",
-            "type": "string"
-          },
-          "lock_handle": {
-            "description": "Optional lock handle. Omit it and this call takes and releases its own lock (#169).",
-            "type": "string"
-          },
-          "long": {
-            "description": "Long description (max 40 chars)",
-            "type": "string"
-          },
-          "medium": {
-            "description": "Medium description (max 20 chars)",
-            "type": "string"
-          },
-          "name": {
-            "description": "Data element name",
-            "type": "string"
-          },
-          "short": {
-            "description": "Short description (max 10 chars)",
-            "type": "string"
-          },
-          "transport": {
-            "description": "Transport request number (optional for $TMP objects)",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "language"
-        ],
-        "type": "object"
-      },
-      "name": "WriteDataElementLabels"
-    },
-    "handler": "github.com/oisee/vibing-steampunk/internal/mcp.(*Server).handleWriteDataElementLabels-fm"
-  },
-  {
-    "tool": {
-      "annotations": {
-        "readOnlyHint": false,
-        "destructiveHint": true,
-        "idempotentHint": false,
-        "openWorldHint": true
-      },
       "description": "Update message class texts in a specific language. Takes and releases its own lock unless a lock handle from LockObject is given. Use for translating message class entries.",
       "inputSchema": {
         "properties": {
@@ -5008,6 +4912,10 @@
           "test_source": {
             "description": "Test source code for CLAS (auto-creates test include and runs tests)",
             "type": "string"
+          },
+          "timeout": {
+            "description": "Seconds this call may take in all (default: the server's --call-timeout; without one, each request to SAP is limited to 60s). When it runs out the call returns a timeout message; the work may still be running on SAP.",
+            "type": "number"
           },
           "transport": {
             "description": "Transport request number",
