@@ -2,15 +2,20 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	openrfc "github.com/oisee/open-rfc-go/rfc"
 
 	"github.com/oisee/vibing-steampunk/pkg/adt"
+	"github.com/oisee/vibing-steampunk/pkg/config"
 	"github.com/oisee/vibing-steampunk/pkg/mcpext"
+	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
 
 // Extensions (pkg/mcpext) add SAP() actions from outside this module. They
@@ -80,18 +85,142 @@ func (s *Server) routeExtensionAction(ctx context.Context, action, objectType, o
 	if err := safety.CheckOperation(ea.action.Op, name); err != nil {
 		return newToolResultError(err.Error()), true, nil
 	}
-	res, err := ea.action.Handler(ctx, serverEnv{s: s}, objectName, params)
+	res, err := ea.action.Handler(ctx, s.extensionEnv(ea.ext), objectName, params)
 	return res, true, err
 }
 
-// serverEnv is what an extension handler gets: the server's own clients.
-type serverEnv struct{ s *Server }
+// serverEnv is what an extension gets on a server: the server's own clients,
+// connections and task registry, and its own settings.
+type serverEnv struct {
+	s   *Server
+	ext string // the extension's name, for its settings and log lines
+}
+
+func (s *Server) extensionEnv(ext mcpext.Extension) serverEnv {
+	return serverEnv{s: s, ext: ext.Name()}
+}
 
 func (e serverEnv) ADT() *adt.Client { return e.s.adtClient }
 
 func (e serverEnv) RFC(ctx context.Context) (*openrfc.Client, func(), error) {
 	// No params: the server's own gateway and logon, never a per-call host.
 	return e.s.rfcClientFor(ctx, map[string]any{})
+}
+
+func (e serverEnv) RFCDedicated(ctx context.Context, timeout time.Duration) (*openrfc.Client, error) {
+	dest, err := e.s.rfcDestination(map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	c, err := saprfc.OpenWithTimeout(ctx, dest, timeout)
+	if err != nil {
+		return nil, fmt.Errorf("RFC logon to %s:%d failed: %w", dest.Host, dest.Port, err)
+	}
+	return c, nil
+}
+
+func (e serverEnv) DropRFC(ctx context.Context) { e.s.dropSharedRFC(ctx) }
+
+func (e serverEnv) ZADTVSP(ctx context.Context) (*adt.DebugWebSocketClient, error) {
+	if err := e.s.ensureDebugWSClient(ctx); err != nil {
+		return nil, err
+	}
+	return e.s.debugWSClient, nil
+}
+
+func (e serverEnv) System() mcpext.System {
+	sys := mcpext.System{URL: e.s.config.BaseURL, Client: e.s.config.Client, User: e.s.config.Username,
+		Language: e.s.config.Language, ReadOnly: e.s.adtClient.Safety().ReadOnly}
+	if cfg, _, err := config.LoadSystems(); err == nil && cfg != nil {
+		if name, _, ok, oerr := e.s.ownSystem(cfg); oerr == nil && ok {
+			sys.Name = name
+		}
+	}
+	return sys
+}
+
+func (e serverEnv) Setting(key string) (any, bool) {
+	cfg, _, err := config.LoadSystems()
+	if err != nil || cfg == nil {
+		return nil, false
+	}
+	_, sys, ok, oerr := e.s.ownSystem(cfg)
+	if oerr != nil || !ok {
+		return nil, false
+	}
+	return sys.ExtensionSetting(e.ext, key)
+}
+
+func (e serverEnv) StartAsync(kind string, fn func(ctx context.Context) (any, error)) (string, error) {
+	return e.s.startAsyncTask(kind, fn), nil
+}
+
+func (e serverEnv) Logf(format string, args ...any) {
+	if e.s.config.Verbose {
+		fmt.Fprintf(os.Stderr, "[%s] %s\n", e.ext, fmt.Sprintf(format, args...))
+	}
+}
+
+// startAsyncTask runs fn in the background under the registry
+// GET_ASYNC_RESULT reads.
+func (s *Server) startAsyncTask(kind string, fn func(ctx context.Context) (any, error)) string {
+	s.asyncTasksMu.Lock()
+	s.asyncTaskID++
+	id := fmt.Sprintf("%s_%d_%d", kind, time.Now().Unix(), s.asyncTaskID)
+	task := &AsyncTask{ID: id, Type: kind, Status: "running", StartedAt: time.Now()}
+	s.asyncTasks[id] = task
+	s.asyncTasksMu.Unlock()
+	go func() {
+		var (
+			result any
+			err    error
+		)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("task panicked: %v", r)
+				}
+			}()
+			result, err = fn(context.Background())
+		}()
+		s.asyncTasksMu.Lock()
+		defer s.asyncTasksMu.Unlock()
+		now := time.Now()
+		task.EndedAt = &now
+		if err != nil {
+			task.Status, task.Error = "error", err.Error()
+			return
+		}
+		task.Status, task.Result = "completed", result
+	}()
+	return id
+}
+
+// StartExtensions tells the extensions that implement mcpext.Starter that the
+// server starts serving. vsp.Run calls it before serving; an error stops it.
+func (s *Server) StartExtensions(ctx context.Context) error {
+	for _, ext := range s.config.Extensions {
+		if st, ok := ext.(mcpext.Starter); ok {
+			if err := st.Start(ctx, s.extensionEnv(ext)); err != nil {
+				return fmt.Errorf("extension %s: %w", ext.Name(), err)
+			}
+		}
+	}
+	return nil
+}
+
+// CloseExtensions tells the extensions that implement mcpext.Closer that the
+// server stops. Every one is told; the errors are joined.
+func (s *Server) CloseExtensions(ctx context.Context) error {
+	var errs []error
+	for _, ext := range s.config.Extensions {
+		if c, ok := ext.(mcpext.Closer); ok {
+			if err := c.Close(ctx); err != nil {
+				errs = append(errs, fmt.Errorf("extension %s: %w", ext.Name(), err))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // extensionHelp answers SAP(action="help", target=<extension name>).
@@ -128,6 +257,24 @@ func (s *Server) extensionsHelpSuffix() string {
 	sort.Strings(names)
 	return "\n\nExtensions: " + strings.Join(names, ", ") +
 		` — SAP(action="help", target="<name>") for each.`
+}
+
+// extensionsInfoLine is SAP(action="info")'s line about the extensions, with
+// their versions; empty without extensions.
+func (s *Server) extensionsInfoLine() string {
+	if len(s.config.Extensions) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, ext := range s.config.Extensions {
+		v := "unversioned"
+		if ver, ok := ext.(mcpext.Versioned); ok && ver.Version() != "" {
+			v = ver.Version()
+		}
+		parts = append(parts, ext.Name()+" "+v)
+	}
+	sort.Strings(parts)
+	return "  extensions   " + strings.Join(parts, ", ") + "\n"
 }
 
 // withHelpSuffix appends suffix to the general help (no target); any other

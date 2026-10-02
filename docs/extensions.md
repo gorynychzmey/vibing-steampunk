@@ -33,9 +33,64 @@ help text, and its actions. Each `mcpext.Action` declares
   `--enable-transports`) for `Mutate` and `Execute`;
 - `Handler` -- the code, called with the object name and the call's params.
 
-The handler gets an `mcpext.Env`: `ADT()` is the server's own ADT client,
-`RFC(ctx)` a client on the server's own RFC gateway. See
-`pkg/mcpext/example_test.go` for a complete extension.
+See `pkg/mcpext/example_test.go` for a complete extension.
+
+### What a handler gets: `mcpext.Env`
+
+| Method | What it is |
+|---|---|
+| `ADT()` | the server's own ADT client, with its safety configuration and mutation gate |
+| `RFC(ctx)` | a client on the server's own RFC gateway, as `SAP(action="rfc")` uses it |
+| `RFCDedicated(ctx, timeout)` | a connection of its own on that gateway, for a call that outlasts the shared one |
+| `DropRFC(ctx)` | forget the shared RFC client after its connection died |
+| `ZADTVSP(ctx)` | the server's WebSocket to ZADT_VSP, for an extension with an ABAP service of its own |
+| `System()` | the connected system: `.vsp.json` name, URL, client, user, language, read-only |
+| `Setting(key)` | the extension's own setting for this system (below) |
+| `StartAsync(kind, fn)` | a background task, reported by `GET_ASYNC_RESULT` |
+| `Logf(...)` | a diagnostic line under `--verbose` |
+
+A workflow that locks an object and writes under the lock runs the mutation
+gate first with `ADT().PrepareMutation(ctx, adt.MutationContext{...})` and
+uses the returned context for the whole lock window; `ADT().CheckMutation`
+is the same gate without that. Both are the gate every built-in write runs.
+
+### Settings
+
+Each system in `.vsp.json` can carry settings for each extension:
+
+```json
+{"systems": {"dev": {"url": "...", "extensions": {"forms": {"allow_create": true}}}}}
+```
+
+`vsp` reads none of them; `Env.Setting("allow_create")` returns the forms
+extension's own value for the connected system.
+
+### Optional interfaces
+
+An extension implements those it needs:
+
+- `Versioned` -- its version, shown by `SAP(action="info")` and `vsp --version`;
+- `Requirer` -- the `mcpext.APIVersion` it needs at least; an older binary
+  refuses it at startup instead of failing on first use;
+- `Starter`, `Closer` -- told when an MCP server starts and stops;
+- `CommandProvider` -- command-line commands, at the top level or under a
+  built-in command (`Parent: "transport"` gives `vsp transport <cmd>`). Their
+  `RunE` gets an `Env` built from the same system, credentials and flags as
+  every built-in command. A command whose name is taken, or whose parent does
+  not exist, stops `vsp.Run`.
+
+### Helpers and tests
+
+`mcpext.String`, `Bool`, `Int` and `Strings` read params the way the built-in
+actions do; `mcpext.JSON`, `Text` and `Errorf` build results.
+
+`pkg/mcpext/mcpexttest` has a fake `Env` for a handler's own tests, and
+`mcpexttest.Check(t, ext)`, which puts an extension through the core's rules
+without a SAP system: accepted by `vsp.Run`, every `Mutate` and `Execute`
+action refused under `--read-only` before its handler runs, listed in the
+help.
+
+The package changes only by addition; `mcpext.APIVersion` grows with each.
 
 ## What the core guarantees
 

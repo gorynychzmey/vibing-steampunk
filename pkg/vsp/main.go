@@ -356,6 +356,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// Create and start MCP server
 	cfg.Extensions = extensions
 	srv := mcp.NewServer(cfg)
+	if err := srv.StartExtensions(context.Background()); err != nil {
+		return err
+	}
+	defer func() {
+		if err := srv.CloseExtensions(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		}
+	}()
 
 	return serveMCP(cmd, func() error {
 		switch cfg.Transport {
@@ -1004,9 +1012,13 @@ func Run(exts ...mcpext.Extension) {
 		os.Exit(1)
 	}
 	extensions = exts
+	if err := attachExtensionCommands(exts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	// Set here, not in rootCmd's literal: that is evaluated when the package
 	// initialises, before cmd/vsp's main has handed over the build flags.
-	rootCmd.Version = fmt.Sprintf("%s (commit: %s, built: %s)", Version, Commit, BuildDate)
+	rootCmd.Version = fmt.Sprintf("%s (commit: %s, built: %s)", Version, Commit, BuildDate) + extensionVersions(exts)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

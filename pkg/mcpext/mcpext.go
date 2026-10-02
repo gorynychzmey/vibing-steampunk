@@ -24,12 +24,20 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	openrfc "github.com/oisee/open-rfc-go/rfc"
+	"github.com/spf13/cobra"
 
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
+
+// APIVersion is the version of this package's contract. It grows by one with
+// every addition an extension may come to rely on; nothing is taken away. An
+// extension that needs a later version than the binary's says so through
+// Requirer and is refused at startup instead of failing on first use.
+const APIVersion = 2
 
 // Class is what an action does to the system, as the read-only invariant
 // classifies the built-in actions.
@@ -98,6 +106,39 @@ type Env interface {
 	// rules as SAP(action="rfc"): no per-call host or system number, the
 	// server's own logon. release gives it back.
 	RFC(ctx context.Context) (client *openrfc.Client, release func(), err error)
+	// RFCDedicated opens a connection of its own on the same gateway, with
+	// the same logon, for a call that outlasts the shared client's timeout.
+	// The caller closes it.
+	RFCDedicated(ctx context.Context, timeout time.Duration) (*openrfc.Client, error)
+	// DropRFC forgets the shared RFC client after its connection died
+	// (openrfc.ErrTransport, openrfc.ErrClosed), so the next RFC logs on
+	// again instead of failing forever.
+	DropRFC(ctx context.Context)
+	// ZADTVSP returns the WebSocket to the system's ZADT_VSP, connected on
+	// first use. On a server it is the server's own connection, shared with
+	// the built-in actions; do not close it.
+	ZADTVSP(ctx context.Context) (*adt.DebugWebSocketClient, error)
+	// System is the system this server or command is connected to.
+	System() System
+	// Setting returns one of this extension's settings for the connected
+	// system, from .vsp.json: systems.<name>.extensions.<extension>.<key>.
+	Setting(key string) (value any, ok bool)
+	// StartAsync runs fn in the background and returns a task id that
+	// SAP(action="debug", target="GET_ASYNC_RESULT") reports on. It is not
+	// available to a command line, which ends with the command.
+	StartAsync(kind string, fn func(ctx context.Context) (any, error)) (taskID string, err error)
+	// Logf writes a diagnostic line when the binary runs with --verbose.
+	Logf(format string, args ...any)
+}
+
+// System identifies the connected system.
+type System struct {
+	Name     string // the .vsp.json system name; empty without one
+	URL      string
+	Client   string
+	User     string
+	Language string
+	ReadOnly bool
 }
 
 // Extension is a set of actions with a name.
@@ -109,6 +150,50 @@ type Extension interface {
 	Actions() []Action
 	// Help is the text SAP(action="help", target=Name()) returns.
 	Help() string
+}
+
+// The interfaces below are optional: an extension implements those it needs.
+
+// Versioned reports the extension's own version, shown by SAP(action="info")
+// and `vsp version`.
+type Versioned interface {
+	Version() string
+}
+
+// Requirer names the APIVersion an extension needs at least.
+type Requirer interface {
+	RequiredAPIVersion() int
+}
+
+// Starter is told when an MCP server starts serving, with the server's Env;
+// an error stops the server.
+type Starter interface {
+	Start(ctx context.Context, env Env) error
+}
+
+// Closer is told when the MCP server stops.
+type Closer interface {
+	Close(ctx context.Context) error
+}
+
+// Command is a command-line command an extension adds. Parent names the
+// built-in command it goes under ("transport" for `vsp transport <cmd>`);
+// empty puts it at the top level.
+type Command struct {
+	Parent  string
+	Command *cobra.Command
+}
+
+// EnvFunc builds the Env for a running command, from the same system,
+// credentials and flags every built-in command resolves.
+type EnvFunc func(cmd *cobra.Command) (Env, error)
+
+// CommandProvider adds command-line commands. Their RunE gets the Env from
+// env; the command line checks the declared Op of nothing, so a command that
+// writes must go through Env.ADT(), whose client applies the safety
+// configuration, or check env.ADT().Safety() itself.
+type CommandProvider interface {
+	Commands(env EnvFunc) []Command
 }
 
 var readOps = map[adt.OperationType]bool{
@@ -146,6 +231,9 @@ func Validate(exts []Extension, builtin func(literal string) bool) error {
 			problems = append(problems, fmt.Sprintf("extensions #%d and #%d are both named %q", j+1, i+1, name))
 		}
 		names[key] = i
+		if r, ok := ext.(Requirer); ok && r.RequiredAPIVersion() > APIVersion {
+			problems = append(problems, fmt.Sprintf("extension %q needs mcpext API version %d, this binary has %d", name, r.RequiredAPIVersion(), APIVersion))
+		}
 		if builtin != nil && builtin(strings.ToUpper(name)) {
 			problems = append(problems, fmt.Sprintf("extension %q has the name of a built-in action or type", name))
 		}
