@@ -262,3 +262,21 @@ func TestDialogHint(t *testing.T) {
 		t.Error("a hint for something else")
 	}
 }
+
+// Deleted within an open request, the container leaves an entry there; the
+// result says so.
+func TestCreateBadiImplementation_UndoNamesTheRequestEntry(t *testing.T) {
+	c, _ := badiFailServer(t, http.StatusOK)
+	c.config.Safety.AllowTransportableEdits = true
+	c.config.Safety.TransportChoice = "off"
+	_, err := c.CreateBadiImplementation(context.Background(), BadiImplementationOptions{
+		Name: "zenh_demo", Description: "Demo", Package: "ZPKG", Transport: "TR-EXAMPLE", Spot: "badi_x", ImplementingClass: "zcl_x",
+	})
+	var pce *PartialCreateError
+	if !errors.As(err, &pce) || !pce.CleanupOK {
+		t.Fatalf("err = %v, want the container deleted", err)
+	}
+	if len(pce.ManualSteps) != 1 || !strings.Contains(pce.ManualSteps[0], "TR-EXAMPLE keeps an entry R3TR ENHO ZENH_DEMO") {
+		t.Errorf("manual steps = %v", pce.ManualSteps)
+	}
+}

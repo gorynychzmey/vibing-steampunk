@@ -70,6 +70,14 @@ func (c *Client) CreateBadiImplementation(ctx context.Context, opts BadiImplemen
 		return "", err
 	}
 	opts.Transport = transport
+	// A transportable package with no request and transportable edits off:
+	// the POST would still land in a request SAP picks, which the lock then
+	// names and the write refuses -- after the container exists. Refused
+	// here instead, before anything is written.
+	if opts.Transport == "" && !strings.HasPrefix(opts.Package, "$") && !c.config.Safety.AllowTransportableEdits {
+		return "", fmt.Errorf("CreateBadiImplementation in package %s is blocked: it is not a local ($) package, and editing transportable "+
+			"objects is disabled (use --allow-transportable-edits and name a transport)", opts.Package)
+	}
 	// The implementation is written by a PUT into the container: an update.
 	// Refused here, before the POST, so a refusal leaves no empty ENHO.
 	if err = c.checkSafety(OpUpdate, "CreateBadiImplementation"); err != nil {
@@ -99,12 +107,17 @@ func (c *Client) CreateBadiImplementation(ctx context.Context, opts BadiImplemen
 	}
 	// With no request chosen at creation, the PUT goes with the one the lock
 	// names, as every other write under a lock does.
-	if opts.Transport, err = c.resolveWriteTransport(opts.Transport, lock.CorrNr, "CreateBadiImplementation"); err != nil {
+	writeTransport, err := c.resolveWriteTransport(opts.Transport, lock.CorrNr, "CreateBadiImplementation")
+	if err != nil {
 		if uerr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); uerr != nil {
 			return objectURL, fmt.Errorf("created %s, but %w; %s", opts.Name, err, strandedLockAdvice(objectURL, uerr))
 		}
-		return c.undoBadiContainer(ctx, objectURL, opts, err)
+		// Not deleted: the refusal is about writing to the request the
+		// container landed in, and a DELETE is a write to that same request.
+		return objectURL, fmt.Errorf("created %s in %s, but %w; it is an empty ENHO without its BAdI implementation: "+
+			"delete it in SE80, or allow the request and add the implementation in SE19 or Eclipse", opts.Name, lock.CorrNr, err)
 	}
+	opts.Transport = writeTransport
 	put := url.Values{}
 	put.Set("lockHandle", lock.LockHandle)
 	if opts.Transport != "" {
@@ -143,6 +156,12 @@ func (c *Client) undoBadiContainer(ctx context.Context, objectURL string, opts B
 	pce := c.cleanupPartialObject(cleanupCtx, objectURL, opts.Package, opts.Transport)
 	pce.OriginalErr = fmt.Errorf("created %s, but %w", opts.Name, stepErr)
 	if pce.CleanupOK {
+		if opts.Transport != "" {
+			// Created and deleted within one open request: the request keeps
+			// an R3TR ENHO entry for an object that no longer exists.
+			pce.ManualSteps = append(pce.ManualSteps, fmt.Sprintf(
+				"%s keeps an entry R3TR ENHO %s for the deleted container; remove it if unwanted (remove_transport_object)", opts.Transport, opts.Name))
+		}
 		return "", pce
 	}
 	pce.ManualSteps = append([]string{
