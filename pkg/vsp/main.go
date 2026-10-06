@@ -66,6 +66,11 @@ Quick start:
   vsp --allowed-packages 'Z*,$TMP' --block-free-sql  # sandbox AI to custom code
   vsp --disallowed-ops CDUA                           # block create/delete/update/activate
 
+  # 4. Through a helper that signs on itself and carries each ADT request
+  #    over its stdin/stdout (frames: 4-byte big-endian length + one raw
+  #    HTTP/1.1 message; one at a time; exit on stdin EOF; logs to stderr only)
+  vsp --url https://sidecar.invalid --transport-cmd /opt/tools/adt-helper
+
 Configuration files:
   .env          Default SAP connection (MCP server mode). SAP_URL, SAP_USER, etc.
   .vsp.json     Multi-system profiles for CLI mode (vsp -s dev, vsp -s prod).
@@ -246,6 +251,16 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// Resolve configuration with priority: flags > env vars > defaults
 	resolveConfig(cmd)
 
+	// A transport command is exclusive with every logon flow of vsp's own,
+	// and those below contact the URL: refuse the mix before any of them runs.
+	if transportCmdErr != nil {
+		return transportCmdErr
+	}
+	if err := transportCmdConflicts(cmd); err != nil {
+		cmd.SilenceUsage = true
+		return err
+	}
+
 	// Validate configuration
 	if err := validateConfig(); err != nil {
 		return err
@@ -301,7 +316,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[VERBOSE] SAP URL: %s\n", cfg.BaseURL)
 		fmt.Fprintf(os.Stderr, "[VERBOSE] SAP Client: %s\n", cfg.Client)
 		fmt.Fprintf(os.Stderr, "[VERBOSE] SAP Language: %s\n", cfg.Language)
-		if cfg.Username != "" {
+		if len(cfg.TransportCmd) > 0 {
+			fmt.Fprintf(os.Stderr, "[VERBOSE] Auth: transport command %s (it authenticates; no local port)\n", adt.TransportCmdName(cfg.TransportCmd))
+		} else if cfg.Username != "" {
 			fmt.Fprintf(os.Stderr, "[VERBOSE] Auth: Basic (user: %s)\n", cfg.Username)
 		} else if cfg.ReauthFunc != nil {
 			fmt.Fprintf(os.Stderr, "[VERBOSE] Auth: SSO/SAML (%d cookies, re-authenticates when the session expires)\n", len(cfg.Cookies))
@@ -359,7 +376,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 		warnNamedSystemMismatch(os.Stderr, cfg, systemsCfg)
 
-		applyDefaultSystemSettings(cfg, systemsCfg)
+		applyDefaultSystemSettings(os.Stderr, cfg, systemsCfg)
 	}
 
 	// The binary's own identity, so SAP() can say which build answered. An
@@ -422,12 +439,16 @@ func warnNamedSystemMismatch(w io.Writer, c *mcp.Config, systemsCfg *config.Syst
 // empty from the default system in .vsp.json: transport_attribute, and where a
 // request vsp creates is filed, cts_project and transport_target. The CLI takes
 // the same keys from the system it runs against (resolveSystemParams).
-func applyDefaultSystemSettings(c *mcp.Config, systemsCfg *config.SystemsConfig) {
+func applyDefaultSystemSettings(w io.Writer, c *mcp.Config, systemsCfg *config.SystemsConfig) {
 	if systemsCfg == nil || systemsCfg.Default == "" {
 		return
 	}
 	sys, err := systemsCfg.GetSystem(systemsCfg.Default)
 	if err != nil {
+		// Not fatal for the server, which takes its logon elsewhere; but a
+		// default system that cannot be read (a refused transport_cmd, a
+		// default naming no system) should not pass in silence.
+		fmt.Fprintf(w, "[WARNING] default system settings from .vsp.json not applied: %v\n", err)
 		return
 	}
 	if c.TransportAttribute == "" && sys.TransportAttribute != "" {
@@ -452,6 +473,9 @@ func resolveConfig(cmd *cobra.Command) {
 	samlAuth, _ := cmd.Flags().GetBool("saml-auth")
 	hasSAMLAuth := samlAuth || viper.GetBool("SAML_AUTH")
 	hasCookieAuth := cookieAuthViaCLI || cookieAuthViaEnv || hasBrowserAuth || hasSAMLAuth || ssoRequested(cmd)
+
+	// Transport command: --transport-cmd/--transport-arg > SAP_TRANSPORT_CMD
+	cfg.TransportCmd, transportCmdErr = resolveTransportCmd(cmd)
 
 	// URL: flag > SAP_URL env
 	if cfg.BaseURL == "" {
@@ -911,6 +935,15 @@ func processSAMLAuth(cmd *cobra.Command) error {
 }
 
 func processCookieAuth(cmd *cobra.Command) error {
+	// A transport command authenticates on its own; it needs, and takes,
+	// no other method.
+	if transportCmdErr != nil {
+		return transportCmdErr
+	}
+	if len(cfg.TransportCmd) > 0 {
+		return transportCmdConflicts(cmd)
+	}
+
 	cookieFile, _ := cmd.Flags().GetString("cookie-file")
 	cookieString, _ := cmd.Flags().GetString("cookie-string")
 
@@ -943,7 +976,7 @@ func processCookieAuth(cmd *cobra.Command) error {
 	}
 
 	if authMethods == 0 {
-		return fmt.Errorf("authentication required. Use --user/--password, --cookie-file, --cookie-string, --browser-auth, or --saml-auth")
+		return fmt.Errorf("authentication required. Use --user/--password, --cookie-file, --cookie-string, --browser-auth, --saml-auth, or --transport-cmd")
 	}
 
 	// If cookies already set by browser auth, we're done
@@ -1033,7 +1066,10 @@ func Run(exts ...mcpext.Extension) {
 	// Set here, not in rootCmd's literal: that is evaluated when the package
 	// initialises, before cmd/vsp's main has handed over the build flags.
 	rootCmd.Version = fmt.Sprintf("%s (commit: %s, built: %s)", Version, Commit, BuildDate) + extensionVersions(exts)
-	if err := rootCmd.Execute(); err != nil {
+	err := rootCmd.Execute()
+	// The CLI's transport-command helpers, on success and on error alike.
+	closeTransportCmds()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
