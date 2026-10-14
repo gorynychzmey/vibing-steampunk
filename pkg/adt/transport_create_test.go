@@ -156,3 +156,24 @@ func TestCreateTransportV2_EscapesTheProject(t *testing.T) {
 		t.Errorf("project went into the XML unescaped: %s", body)
 	}
 }
+
+func TestRequestTypeOf(t *testing.T) {
+	for in, want := range map[string]string{"": "K", "workbench": "K", "K": "K", "Customizing": "W", "customising": "W", "w": "W"} {
+		if got, err := RequestTypeOf(in); err != nil || got != want {
+			t.Errorf("RequestTypeOf(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"T", "create_transport", "transport of copies"} {
+		if _, err := RequestTypeOf(in); err == nil {
+			t.Errorf("RequestTypeOf(%q) accepted", in)
+		}
+	}
+}
+
+func TestCreateTransportV2_CustomizingNeedsNoPackage(t *testing.T) {
+	client, rec := newCreateClient(t)
+	if _, err := client.CreateTransportV2(context.Background(), CreateTransportOptions{Description: "demo", Type: "customizing"}); err != nil {
+		t.Fatalf("CreateTransportV2: %v", err)
+	}
+	assertAttr(t, rec.only(t), "tm:type", "W")
+}

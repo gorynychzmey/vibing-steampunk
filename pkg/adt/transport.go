@@ -398,7 +398,7 @@ type CreateTransportOptions struct {
 	Description    string
 	Package        string
 	TransportLayer string
-	Type           string // "workbench" or "customizing"
+	Type           string // "workbench" (default) or "customizing"; "K" and "W" as well
 	CTSProject     string // CTS project; empty uses the configured one (WithCTSProject)
 	Target         string // transport target; empty uses the configured one (WithTransportTarget)
 }
@@ -765,6 +765,19 @@ func parseTransportDetail(data []byte) (*TransportDetails, error) {
 	return t, nil
 }
 
+// RequestTypeOf maps the request type a caller names to the one-letter
+// type of the Transport Organizer: workbench (K, the default when empty) or
+// customizing (W). Anything else is refused rather than read as workbench.
+func RequestTypeOf(t string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "", "workbench", "k":
+		return "K", nil
+	case "customizing", "customising", "w":
+		return "W", nil
+	}
+	return "", fmt.Errorf("unknown request type %q: use \"workbench\" (K) or \"customizing\" (W)", t)
+}
+
 // CreateTransportV2 creates a new transport request with options
 func (c *Client) CreateTransportV2(ctx context.Context, opts CreateTransportOptions) (string, error) {
 	// Safety check
@@ -775,14 +788,14 @@ func (c *Client) CreateTransportV2(ctx context.Context, opts CreateTransportOpti
 	if opts.Description == "" {
 		return "", fmt.Errorf("description is required")
 	}
-	if opts.Package == "" {
-		return "", fmt.Errorf("package is required")
+	reqType, err := RequestTypeOf(opts.Type)
+	if err != nil {
+		return "", err
 	}
-
-	// Default to workbench request
-	reqType := "K"
-	if strings.ToLower(opts.Type) == "customizing" {
-		reqType = "W"
+	// A customizing request records table contents, not repository objects:
+	// it has no package to name.
+	if opts.Package == "" && reqType == "K" {
+		return "", fmt.Errorf("package is required")
 	}
 
 	body := c.newRequestBody(reqType, opts.Description, opts.Target, opts.CTSProject, true)

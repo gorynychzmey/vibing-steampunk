@@ -316,6 +316,20 @@ func (s *Server) handleGetTransport(ctx context.Context, request mcp.CallToolReq
 	return mcp.NewToolResultText(string(jsonBytes)), nil
 }
 
+// createRequestType is the request type a create call names. Through
+// SAP(action="system") "type" is taken by the operation itself
+// ("create_transport"), so the request type comes as "request_type"; the
+// CreateTransport tool of the expert mode names it "type".
+func createRequestType(args map[string]any) string {
+	if t, _ := args["request_type"].(string); t != "" {
+		return t
+	}
+	if t, _ := args["type"].(string); t != "create_transport" {
+		return t
+	}
+	return ""
+}
+
 func (s *Server) handleCreateTransport(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// Check safety config for transport write operations
 	if err := s.adtClient.Safety().CheckTransport("", "CreateTransport", true); err != nil {
@@ -327,13 +341,18 @@ func (s *Server) handleCreateTransport(ctx context.Context, request mcp.CallTool
 		return newToolResultError("description is required"), nil
 	}
 
-	pkg, ok := request.GetArguments()["package"].(string)
-	if !ok || pkg == "" {
+	transportType := createRequestType(request.GetArguments())
+	reqType, err := adt.RequestTypeOf(transportType)
+	if err != nil {
+		return newToolResultError(err.Error()), nil
+	}
+
+	pkg, _ := request.GetArguments()["package"].(string)
+	if pkg == "" && reqType == "K" {
 		return newToolResultError("package is required"), nil
 	}
 
 	transportLayer, _ := request.GetArguments()["transport_layer"].(string)
-	transportType, _ := request.GetArguments()["type"].(string)
 	ctsProject, _ := request.GetArguments()["cts_project"].(string)
 	target, _ := request.GetArguments()["target"].(string)
 
